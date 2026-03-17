@@ -106,6 +106,11 @@ Follow these steps to run the project locally:
 6. **Open in browser:**
    Go to [http://localhost:3000](http://localhost:3000)
 
+7. **Important: Authorize your Deployment Domain**
+   If you deploy to a service like Vercel, you *must* add your production domain to the Firebase console:
+   - Go to **Firebase Console** > **Authentication** > **Settings** > **Authorized domains**.
+   - Click **Add domain** and enter your deployment URL (e.g., `orbit-lead.vercel.app`).
+
 ---
 
 ## 🧪 How to Test the Project
