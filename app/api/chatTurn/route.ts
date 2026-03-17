@@ -85,7 +85,7 @@ export async function POST(req: Request) {
 
     // 5. Initialize Groq & Call AI
     trace("Groq AI Call Started");
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY?.trim() });
     let aiResponseContent = "";
 
     try {
