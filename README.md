@@ -1,36 +1,172 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# OrbitLead – AI Sales Assistant
 
-## Getting Started
+"An AI-powered sales assistant that qualifies leads, suggests plans, and books demos automatically."
 
-First, run the development server:
+---
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## 👨‍💻 Developer Info
+
+Developed by **Jenil Gajipara**  
+
+
+---
+
+## 🚀 Project Overview
+
+**OrbitLead** is a modern SaaS prototype designed to automate the initial stages of the sales funnel. Instead of forcing users to fill out long, static forms, OrbitLead uses an interactive **AI-powered Chatbot** to engage visitors naturally.
+
+The AI qualifies the lead by extracting key business data, scores them based on their potential value, suggests localized pricing plans (INR), and can even confirm demo bookings—all without human intervention. This project demonstrates how LLMs can replace manual lead qualification, saving sales teams hours of work and improving conversion efficiency.
+
+---
+
+## ✨ Features
+
+- **AI Chat-based Lead Qualification**: Interactive conversation to collect lead details.
+- **Lead Data Extraction**: Intelligent extraction of name, company, team size, budget, and timeline.
+- **Automatic Lead Scoring**: Leads are scored based on budget and requirements.
+- **Pricing Suggestions**: AI suggests tailored pricing plans (Starter, Growth, Enterprise) in INR.
+- **Demo Booking System**: Automatic scheduling logic triggered by the AI.
+- **Lead Pipeline Dashboard**: A professional Kanban-style board to track lead stages.
+- **Real-time Synchronization**: Pipeline updates instantly using Firebase listeners.
+- **Firebase Integration**: Robust Authentication (Google) and Firestore database management.
+
+---
+
+## 🛠 Tech Stack
+
+**Frontend:**
+- **Next.js 14** (App Router)
+- **TypeScript**
+- **TailwindCSS** (Styling)
+- **ShadCN UI** (Modern Components)
+
+**Backend:**
+- **Firebase Auth** (Authentication)
+- **Firestore** (NoSQL Database)
+- **Firebase Admin SDK** (Secure Backend Validation)
+
+**AI Engine:**
+- **Groq API** (Llama 3.1 8B Instant)
+
+---
+
+## 📂 Folder Structure
+
+```text
+/app         # Next.js routes, pages, and API handlers
+/components  # Reusable UI components (Modals, Forms, Kanban)
+/lib         # Configuration (Firebase, Groq, Admin SDK)
+/types       # TypeScript interfaces and definitions
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## ⚙️ Setup Instructions
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Follow these steps to run the project locally:
 
-## Learn More
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/jenil173/orbit-lead.git
+   cd orbit-lead
+   ```
 
-To learn more about Next.js, take a look at the following resources:
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+3. **Create .env.local file:**
+   Create a file named `.env.local` in the root directory.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+4. **Add environment variables:**
+   Paste the following into your `.env.local` and fill in your keys:
+   ```env
+   # Firebase Config
+   NEXT_PUBLIC_FIREBASE_API_KEY=your_api_key
+   NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_auth_domain
+   NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_project_id
+   NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your_storage_bucket
+   NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your_sender_id
+   NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
 
-## Deploy on Vercel
+   # AI Config
+   GROQ_API_KEY=your_groq_key
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+   # Service Account (Backend Security)
+   FIREBASE_CLIENT_EMAIL=your_admin_email
+   FIREBASE_PRIVATE_KEY="your_private_key_string"
+   ```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+5. **Run the project:**
+   ```bash
+   npm run dev
+   ```
+
+6. **Open in browser:**
+   Go to [http://localhost:3000](http://localhost:3000)
+
+---
+
+## 🧪 How to Test the Project
+
+Use these scenarios to test the AI's intelligence and the dashboard's automation:
+
+### **Test 1 – High-Value Customer (The "Vikram" Test)**
+- **Input:** *"Hi, I'm Vikram from CloudScale. We have 60 people and a budget of ₹4,00,000. We need to start next week."*
+- **Result:** AI suggests **Enterprise Plan**, offers a **Demo Booking**, and creates a card in the **Pipeline Dashboard** with a high score.
+
+### **Test 2 – Small Business (The "Anjali" Test)**
+- **Input:** *"I'm Anjali from a small agency. 8 people, budget is ₹90,000."*
+- **Result:** AI suggests **Growth Plan**. Does not push for a demo as hard as high-value leads.
+
+### **Test 3 – Objection Handling**
+- **Input:** *"These plans are too expensive. Do you have a discount?"*
+- **Result:** AI professionally stays on message, explains value, and sticks to the system-defined pricing rules.
+
+### **Test 4 – Demo Booking Completion**
+- **Input:** *"Yes, I want to book the demo for Monday at 10AM."*
+- **Result:** AI confirms booking. Check the **Dashboard**; the lead card will automatically jump to the **"Demo Booked"** stage.
+
+---
+
+## 🎮 Demo Flow (For Evaluators)
+
+1. **Login**: Authenticate using the Google Login button.
+2. **Chat**: Click "Open AI Chat" and engage the agent with the Test Scenarios.
+3. **Data Verification**: Click on a Lead Card in the Dashboard to see real-time data extraction.
+4. **Settings**: Go to `/dashboard/settings` and change the prices—then chat again to see the AI reflect them instantly.
+5. **Dashboard**: Drag and drop leads across columns to see the visual pipeline management.
+
+---
+
+## 🔐 Firebase Security
+
+- **Firestore Security Rules**: Rules are configured to require user authentication for all reads/writes.
+- **Environment Protection**: All sensitive API keys and Private Keys are stored in `.env.local` and never committed to the repository.
+- **Backend Validation**: Every AI request is validated server-side using the Firebase Admin SDK to verify the user's Auth token.
+
+---
+
+## 🧠 AI Usage
+
+- **Lead Extraction**: The AI replaces static forms by capturing data through conversation.
+- **Dynamic Pricing**: AI reads current prices from the database so it never "hallucinates" old or incorrect pricing.
+- **Strategic Flow**: Logic is built to prioritize high-value leads for demos while educating smaller leads.
+
+---
+
+## 📈 Future Improvements
+
+- **Real Calendar Integration**: Connect to Google Calendar/Calendly for actual scheduling.
+- **Advanced Evaluation**: Use Multi-Agent systems for more complex lead grading.
+- **Analytics**: Visualization of conversion rates across the pipeline.
+- **CRM Export**: One-click export to Salesforce or HubSpot.
+
+---
+
+## 📌 Conclusion
+
+This project demonstrates how AI can automate sales workflows, eliminate boring forms, and significantly improve lead conversion efficiency through natural conversation.
+
+Developed with ❤️ by **Jenil Gajipara**
