@@ -20,8 +20,11 @@ function calculateScore(budget: number, teamSize: number, timeline: string): num
 }
 
 export async function POST(req: Request) {
+  const start = Date.now();
+  const trace = (step: string) => console.log(`[TRACE] ${step} at +${Date.now() - start}ms`);
+
   try {
-    console.log("[API] Chat Turn Request Received");
+    trace("Request Received");
 
     // 1. Validate environment variables
     if (!process.env.GROQ_API_KEY) {
@@ -38,6 +41,7 @@ export async function POST(req: Request) {
       message = body.message;
       conversationId = body.conversationId;
       userId = body.userId;
+      trace("Body Parsed");
     } catch (e) {
       console.error("[API] Error parsing request body");
       return Response.json({ reply: "Invalid request format." }, { status: 400 });
@@ -47,44 +51,44 @@ export async function POST(req: Request) {
       return Response.json({ reply: "Message is required." }, { status: 400 });
     }
 
-    // 3. Optional: Authentication Check (Kept from existing logic for security)
+    // 3. Optional: Authentication Check
     const authHeader = req.headers.get('Authorization');
     if (authHeader?.startsWith('Bearer ')) {
+      trace("Auth Verification Started");
       const idToken = authHeader.split('Bearer ')[1];
       try {
-        const decodedToken = await adminAuth.verifyIdToken(idToken);
-        if (userId && userId !== decodedToken.uid) {
-           console.warn("[API] User ID mismatch");
-           // We'll proceed but log it; in strict mode we'd return 401
-        }
+        await adminAuth.verifyIdToken(idToken);
+        trace("Auth Verified");
       } catch (authError) {
         console.error("[API] Auth verification failed");
         return Response.json({ reply: "Session expired, please login again." }, { status: 401 });
       }
     }
 
-    // 4. Fetch Conversation History (Non-critical, wrap in try/catch)
+    // 4. Fetch Conversation History
     let history = [];
     let convSnap;
     try {
       if (conversationId) {
+        trace("Firestore History Fetch Started");
         const convRef = doc(db, 'conversations', conversationId);
         convSnap = await getDoc(convRef);
         if (convSnap.exists()) {
           history = convSnap.data().messages || [];
           history = history.slice(-10);
         }
+        trace("Firestore History Fetched");
       }
     } catch (historyError) {
       console.error("[API] Error fetching history:", historyError);
     }
 
     // 5. Initialize Groq & Call AI
+    trace("Groq AI Call Started");
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     let aiResponseContent = "";
 
     try {
-      // Dynamic pricing for system prompt
       const starterPrice = pricingConfig.Starter.toLocaleString('en-IN');
       const growthPrice = pricingConfig.Growth.toLocaleString('en-IN');
       const enterprisePrice = pricingConfig.Enterprise.toLocaleString('en-IN');
@@ -109,12 +113,13 @@ Return ONLY a JSON object with:
           })),
           { role: 'user', content: message }
         ],
-        model: 'llama-3.3-70b-versatile',
-        temperature: 0.5,
+        model: 'llama-3.1-8b-instant', // Faster model
+        temperature: 0.1, // Faster/Deterministic
         response_format: { type: 'json_object' }
       });
 
       aiResponseContent = completion.choices[0]?.message?.content || "{}";
+      trace("Groq AI Call Completed");
     } catch (aiError) {
       console.error("[API] Groq API failure:", aiError);
       return Response.json({ 
@@ -135,8 +140,9 @@ Return ONLY a JSON object with:
 
     const { reply, extracted_data } = parsedAI;
 
-    // 7. Process Lead Data safely in background (Fire and forget, don't await if you want max speed, but here we keep it safe)
+    // 7. Process Lead Data safely
     if (extracted_data && conversationId) {
+      trace("Firestore Lead Update Started");
       try {
         const budgetNum = Number(String(extracted_data.budget || 0).replace(/[^0-9.-]+/g,"")) || 0;
         const teamNum = parseInt(String(extracted_data.teamSize || 0), 10) || 0;
@@ -168,13 +174,14 @@ Return ONLY a JSON object with:
           });
           await updateDoc(doc(db, 'conversations', conversationId), { leadId: leadRef.id });
         }
+        trace("Firestore Lead Update Completed");
       } catch (leadError) {
         console.error("[API] Error updating lead data:", leadError);
       }
     }
 
-    // 8. Return final response in requested format
-    console.log("[API] Success");
+    // 8. Return final response
+    trace("Success - Returning Response");
     return Response.json({ reply: reply || "I'm here to help!" });
 
   } catch (fatalError: any) {
