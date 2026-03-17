@@ -83,16 +83,21 @@ export default function ChatPage() {
         body: JSON.stringify({ message: userMsg.content, conversationId: currentConvId, userId: user.uid }),
       });
 
-      if (!res.ok) throw new Error("Failed to get response");
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        console.error("API Error Response:", errorData);
+        throw new Error(errorData.reply || errorData.error || "Failed to get response");
+      }
       
       const data = await res.json();
       const aiMsg: Message = { role: "assistant", content: data.reply };
       
       setMessages((prev) => [...prev, aiMsg]);
 
-    } catch (error) {
+    } catch (error: any) {
       console.error("Chat error:", error);
-      setMessages((prev) => [...prev, { role: "assistant", content: "Sorry, I'm having trouble connecting right now." }]);
+      const errorMessage = error.message || "Sorry, I'm having trouble connecting right now.";
+      setMessages((prev) => [...prev, { role: "assistant", content: errorMessage }]);
     } finally {
       setIsTyping(false);
     }

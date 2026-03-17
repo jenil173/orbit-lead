@@ -10,52 +10,87 @@ function calculateScore(budget: number, teamSize: number, timeline: string): num
   let score = 0;
   if (budget > 100000) score += 30;
   if (teamSize > 10) score += 20;
-  if (timeline && timeline.toLowerCase().includes('soon') || timeline.toLowerCase().includes('asap') || timeline.toLowerCase().includes('now')) {
+  
+  const tl = (timeline || '').toLowerCase();
+  if (tl.includes('soon') || tl.includes('asap') || tl.includes('now')) {
     score += 20;
   }
   return Math.min(score, 100);
 }
 
 export async function POST(req: Request) {
+  console.log("--- Chat Turn API Started ---");
   try {
+    // 1. Validate Environment Variables
+    const requiredEnv = ['GROQ_API_KEY', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY', 'NEXT_PUBLIC_FIREBASE_PROJECT_ID'];
+    const missingEnv = requiredEnv.filter(key => !process.env[key]);
+    if (missingEnv.length > 0) {
+      console.error("CRITICAL: Missing environment variables:", missingEnv);
+      return NextResponse.json({ 
+        error: 'Server configuration error', 
+        details: `Missing: ${missingEnv.join(', ')}`,
+        reply: 'I am correctly misconfigured on the server. Please check environment variables.' 
+      }, { status: 500 });
+    }
+
+    // 2. Auth Verification
     const authHeader = req.headers.get('Authorization');
     if (!authHeader?.startsWith('Bearer ')) {
+      console.warn("Auth failed: Missing or invalid header");
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     const idToken = authHeader.split('Bearer ')[1];
     let decodedToken;
     try {
       decodedToken = await adminAuth.verifyIdToken(idToken);
-    } catch (error) {
-      console.error("Token verification failed", error);
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    } catch (error: any) {
+      console.error("Token verification failed:", error.message);
+      return NextResponse.json({ error: 'Unauthorized', details: error.message }, { status: 401 });
     }
 
-    const { message, conversationId, userId } = await req.json();
+    // 3. Request Body Parsing
+    let body;
+    try {
+      body = await req.json();
+    } catch (e) {
+      console.error("Failed to parse request body");
+      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
+    const { message, conversationId, userId } = body;
+
+    console.log(`Processing message for user ${userId}, conversation ${conversationId}`);
 
     if (!message || !conversationId || !userId || userId !== decodedToken.uid) {
+      console.warn("Validation failed: Missing fields or UID mismatch");
       return NextResponse.json({ error: 'Missing req fields or unauthorized' }, { status: 400 });
     }
 
-    // Fetch dynamic pricing
-    const pricingRef = doc(db, 'config', 'pricing');
-    const pricingSnap = await getDoc(pricingRef);
+    // 4. Fetch dynamic pricing
     let pricing = pricingConfig;
-    if (pricingSnap.exists()) {
-      pricing = pricingSnap.data() as typeof pricingConfig;
+    try {
+      const pricingRef = doc(db, 'config', 'pricing');
+      const pricingSnap = await getDoc(pricingRef);
+      if (pricingSnap.exists()) {
+        pricing = pricingSnap.data() as typeof pricingConfig;
+      }
+    } catch (e: any) {
+      console.warn("Failed to fetch dynamic pricing, falling back to config file:", e.message);
     }
 
-    // Fetch conversation history
-    const convRef = doc(db, 'conversations', conversationId);
-    const convSnap = await getDoc(convRef);
-    
+    // 5. Fetch conversation history
     let history = [];
-    if (convSnap.exists()) {
-      history = convSnap.data().messages || [];
-      // Grab last 10 messages for context
-      history = history.slice(-10);
-    } else {
-       // if we can't find it, just proceed with empty history (edge case)
+    let convSnap;
+    try {
+      const convRef = doc(db, 'conversations', conversationId);
+      convSnap = await getDoc(convRef);
+      
+      if (convSnap.exists()) {
+        history = convSnap.data().messages || [];
+        history = history.slice(-10);
+      }
+    } catch (e: any) {
+      console.error("Failed to fetch conversation history:", e.message);
+      // We can continue with empty history but it's not ideal
     }
 
     const systemPrompt = `
@@ -88,84 +123,96 @@ Always return JSON. Do not return markdown formatted json (\`\`\`json ... \`\`\`
         role: m.role === 'assistant' ? 'assistant' : 'user',
         content: m.content
       })),
-      { role: 'user', content: message } // Always append latest message in case history fetch failed/lagged
+      { role: 'user', content: message }
     ];
 
-    const completion = await groq.chat.completions.create({
-      messages: groqMessages,
-      model: 'llama-3.1-8b-instant',
-      temperature: 0.3,
-      response_format: { type: 'json_object' }
-    });
+    // 6. Groq API Call
+    console.log("Calling Groq API...");
+    let aiContent;
+    try {
+      const completion = await groq.chat.completions.create({
+        messages: groqMessages,
+        model: 'llama-3.1-8b-instant',
+        temperature: 0.3,
+        response_format: { type: 'json_object' }
+      });
+      aiContent = completion.choices[0]?.message?.content || '{}';
+    } catch (e: any) {
+      console.error("Groq API Call Failed:", e.message);
+      return NextResponse.json({ 
+        error: 'AI service unavailable', 
+        details: e.message,
+        reply: "I'm having trouble thinking clearly right now. Please try again in a moment." 
+      }, { status: 503 });
+    }
 
-    const aiContent = completion.choices[0]?.message?.content || '{}';
     let parsedResponse;
     try {
       parsedResponse = JSON.parse(aiContent);
     } catch (e) {
       console.error("Failed to parse Groq response:", aiContent);
       return NextResponse.json({
-         reply: "I apologize, but I encountered an error. Could you please rephrase that?",
+         reply: "I apologize, but I encountered a formatting error. Could you please rephrase that?",
          extractedData: {}
       });
     }
 
     const { reply, extracted_data } = parsedResponse;
 
-    // Process Lead Data
-    if (extracted_data && Object.keys(extracted_data).length > 0) {
-      // Check if lead already exists for this conversation
-      let existingLeadId = convSnap.exists() ? convSnap.data().leadId : null;
-      
-      const budgetNum = typeof extracted_data.budget === 'number' ? extracted_data.budget : Number(String(extracted_data.budget).replace(/[^0-9.-]+/g,"")) || 0;
-      const teamNum = typeof extracted_data.teamSize === 'number' ? extracted_data.teamSize : parseInt(String(extracted_data.teamSize), 10) || 0;
-      const timelineStr = String(extracted_data.timeline || '');
-
-      const newScore = calculateScore(budgetNum, teamNum, timelineStr);
-
-      const isBooked = extracted_data.booking_confirmed === true;
-      let calculatedStage: LeadStage = newScore >= 40 ? 'qualified' : 'new';
-      if (isBooked) {
-        calculatedStage = 'booked';
-      }
-
-      const leadData = {
-        name: extracted_data.name || 'Unknown Visitor',
-        company: extracted_data.company || 'Unknown',
-        teamSize: teamNum,
-        budget: budgetNum,
-        timeline: timelineStr,
-        score: newScore,
-        stage: calculatedStage,
-        updatedAt: Date.now()
-      };
-
-      if (existingLeadId) {
-        // Update existing lead
-        // If the old stage was already 'booked', don't override it backwards unless logic requires, 
-        // but here we just pass the calculatedStage which includes the booking update.
-        await updateDoc(doc(db, 'leads', existingLeadId), leadData);
-      } else if (Object.values(extracted_data).some(v => v !== null && v !== undefined && v !== '' && v !== false)) {
-        // Create new active lead only if we actually extracted something real
-        const leadRef = await addDoc(collection(db, 'leads'), {
-          ...leadData,
-          createdAt: Date.now(),
-          conversationId
-        });
+    // 7. Process Lead Data
+    try {
+      if (extracted_data && Object.keys(extracted_data).length > 0) {
+        let existingLeadId = (convSnap && convSnap.exists()) ? convSnap.data().leadId : null;
         
-        // Link lead to conversation
-        await updateDoc(convRef, { leadId: leadRef.id });
+        const budgetNum = typeof extracted_data.budget === 'number' ? extracted_data.budget : Number(String(extracted_data.budget).replace(/[^0-9.-]+/g,"")) || 0;
+        const teamNum = typeof extracted_data.teamSize === 'number' ? extracted_data.teamSize : parseInt(String(extracted_data.teamSize), 10) || 0;
+        const timelineStr = String(extracted_data.timeline || '');
+
+        const newScore = calculateScore(budgetNum, teamNum, timelineStr);
+
+        const isBooked = extracted_data.booking_confirmed === true;
+        let calculatedStage: LeadStage = newScore >= 40 ? 'qualified' : 'new';
+        if (isBooked) {
+          calculatedStage = 'booked';
+        }
+
+        const leadData = {
+          name: extracted_data.name || 'Unknown Visitor',
+          company: extracted_data.company || 'Unknown',
+          teamSize: teamNum,
+          budget: budgetNum,
+          timeline: timelineStr,
+          score: newScore,
+          stage: calculatedStage,
+          updatedAt: Date.now()
+        };
+
+        if (existingLeadId) {
+          await updateDoc(doc(db, 'leads', existingLeadId), leadData);
+        } else if (Object.values(extracted_data).some(v => v !== null && v !== undefined && v !== '' && v !== false)) {
+          const leadRef = await addDoc(collection(db, 'leads'), {
+            ...leadData,
+            createdAt: Date.now(),
+            conversationId
+          });
+          
+          await updateDoc(doc(db, 'conversations', conversationId), { leadId: leadRef.id });
+        }
       }
+    } catch (e: any) {
+      console.error("Failed to process lead data:", e.message);
+      // We still return the AI reply even if lead processing fails
     }
 
+    console.log("--- Chat Turn API Success ---");
     return NextResponse.json({ reply, extractedData: extracted_data });
 
   } catch (error: any) {
-    console.error('Error in chatTurn API:', error);
+    console.error('FATAL Error in chatTurn API:', error);
     return NextResponse.json({ 
       error: 'Internal server error', 
       details: error.message || 'Unknown error',
-      reply: 'I encountered a system error, please try again.' 
+      reply: 'I encountered a major system error. Our engineers have been notified.' 
     }, { status: 500 });
   }
 }
