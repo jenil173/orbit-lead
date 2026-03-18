@@ -95,7 +95,7 @@ export async function POST(req: Request) {
     // TERMINATION RULE: If state is completed, STOP.
     if (currentLeadData?.stage === 'completed') {
       return Response.json({ 
-        reply: `Thanks for your interest, ${currentLeadData.name}! Our team will be in touch soon regarding your ${currentLeadData.stage} demo.`,
+        reply: `Thanks for your interest, ${currentLeadData.name}! Our team will be in touch soon regarding your scheduled ${currentLeadData.demoTime ? `demo on ${currentLeadData.demoTime}` : 'demo'}.`,
         action: "completed"
       });
     }
@@ -103,57 +103,55 @@ export async function POST(req: Request) {
     // 5. Initialize Groq & Call AI
     trace("Groq AI Call Started");
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY?.trim() });
-    let aiResponseContent = "";
+    
+    // Fallback prices if config is missing
+    const sp = pricingConfig.Starter || 50000;
+    const gp = pricingConfig.Growth || 100000;
+    const ep = pricingConfig.Enterprise || 200000;
 
-    try {
-      const sp = pricingConfig.Starter || 50000;
-      const gp = pricingConfig.Growth || 100000;
-      const ep = pricingConfig.Enterprise || 200000;
+    const leadSummary = currentLeadData ? 
+      `LEAD MEMORY: Name: ${currentLeadData.name || 'null'}, Company: ${currentLeadData.company || 'null'}, Team: ${currentLeadData.teamSize || 'null'}, Budget: ${currentLeadData.budget || 'null'}, Timeline: ${currentLeadData.timeline || 'null'}, DemoTime: ${currentLeadData.demoTime || 'null'}, Stage: ${currentLeadData.stage || 'collecting'}` : 
+      "No prior lead data.";
 
-      const leadSummary = currentLeadData ? 
-        `KNOWN DATA: Name: ${currentLeadData.name || 'null'}, Company: ${currentLeadData.company || 'null'}, Team: ${currentLeadData.teamSize || 'null'}, Budget: ${currentLeadData.budget || 'null'}, Timeline: ${currentLeadData.timeline || 'null'}, Stage: ${currentLeadData.stage || 'collecting'}` : 
-        "No prior lead data.";
+    const systemPrompt = `
+You are the OrbitLead AI Sales Assistant - a high-performance, goal-driven agent (not a chatbot).
+Your MISSION: Progress leads through the funnel: collecting → qualified → proposed → booked → completed.
 
-      const systemPrompt = `
-You are a deterministic AI Sales Agent. NOT a chatbot. Follow these STRICT rules:
+--- LOGIC RULES (STRICT) ---
+1. MEMORY PRESERVATION: ${leadSummary}. 
+   - NEVER ask for information that is already in LEAD MEMORY.
+   - NEVER change the user's name or company once set.
+2. QUESTION STRATEGY:
+   - Ask exactly ONE missing field at a time.
+   - Priority: Budget -> Timeline -> Team Size.
+   - No generic questions. Be direct and professional.
+3. QUALIFICATION & PRICING:
+   - Qualify once 3+ fields exist (e.g., budget, timeline, teamSize).
+   - Suggest Plan: budget ≤ ₹${sp} (Starter: ₹${sp}), budget ≤ ₹${gp} (Growth: ₹${gp}), Else (Enterprise: ₹${ep}).
+   - Always mention the price from currentLeadData.
+4. BOOKING TRIGGER:
+   - If user mentions: book, demo, schedule, meeting, call:
+     * Missing fields? Ask ONLY for the missing fields first.
+     * All info present? Extract "demoTime" (e.g., "Friday at 2pm"), confirm, set "action": "booked".
+5. CONVERSATION END: 
+   - Use the user's name. Confirm the booking and time. Stop asking questions.
 
-STATE MACHINE: collecting → qualified → proposed → booked → completed
-
-DATA EXTRACTION:
-- Extract: name, company, teamSize (number), budget (number), timeline.
-- ${leadSummary}
-- NEVER overwrite or ask for a field already known.
-- NEVER change the user's name once set.
-
-QUESTION STRATEGY:
-- Ask ONLY ONE specific missing field at a time.
-- Priority: 1. budget, 2. timeline, 3. teamSize.
-- NO generic questions like "tell me more".
-
-QUALIFICATION:
-- If 3+ fields exist (e.g., teamSize, budget, timeline) AND stage is "collecting" → transition to "qualified".
-
-PLAN SUGGESTION:
-- Suggest ONLY if stage is "qualified" or "proposed".
-- Logic: Budget ≤ ${sp} → Starter (₹${sp}), Budget ≤ ${gp} → Growth (₹${gp}), else Enterprise (₹${ep}).
-- If proposing, set "action": "suggest".
-
-BOOKING LOGIC:
-- If user mentions: book, schedule, demo, meeting, call:
-  * IF data missing: Ask ONLY the missing field.
-  * IF info sufficient: Confirm booking, use user's name, set "action": "booked", set stage to "booked".
-
-RESPONSE STYLE:
-- Short, professional, direct. Use user's name. No loops.
-
-Return JSON:
+--- OUTPUT FORMAT (JSON ONLY) ---
 {
-  "reply": "string",
-  "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "timeline": "..." },
+  "reply": "your direct, personalized response",
+  "extracted_data": { 
+    "name": "string (don't overwrite)", 
+    "company": "string (don't overwrite)", 
+    "teamSize": number, 
+    "budget": number, 
+    "timeline": "string",
+    "demoTime": "string (e.g. 'Friday 2pm')"
+  },
   "action": "ask" | "suggest" | "booked"
 }
 `;
 
+    try {
       const completion = await groq.chat.completions.create({
         messages: [
           { role: 'system', content: systemPrompt },
@@ -172,7 +170,7 @@ Return JSON:
       trace("Groq AI Call Completed");
     } catch (aiError) {
       console.error("[API] Groq API failure:", aiError);
-      return Response.json({ reply: "Service temporarily unavailable." }, { status: 503 });
+      return Response.json({ reply: "Service is temporarily unavailable. Please try again in a moment." }, { status: 503 });
     }
 
     // 6. Parse AI Response safely
@@ -181,39 +179,44 @@ Return JSON:
       parsedAI = JSON.parse(aiResponseContent);
     } catch (parseError) {
       console.error("[API] Error parsing AI response:", aiResponseContent);
-      return Response.json({ reply: "I encountered an error. Could you repeat that?" });
+      return Response.json({ reply: "I'm sorry, I hit a snag. Could you please repeat that?" });
     }
 
     const { reply, extracted_data, action } = parsedAI;
 
-    // 7. Process Lead Data & State Transitions
+    // 7. Deterministic Lead Processing
     if (extracted_data && conversationId) {
       trace("Firestore Lead Update Started");
       try {
-        // Deterministic Extraction (NEVER overwrite)
-        const budgetNum = Number(String(currentLeadData?.budget || extracted_data.budget || 0).replace(/[^0-9.-]+/g,"")) || 0;
-        const teamNum = parseInt(String(currentLeadData?.teamSize || extracted_data.teamSize || 0), 10) || 0;
-        const timelineStr = String(currentLeadData?.timeline || extracted_data.timeline || '');
-        const nameStr = String(currentLeadData?.name || extracted_data.name || 'Visitor');
-        const companyStr = String(currentLeadData?.company || extracted_data.company || 'Unknown');
+        // PRESERVE STICKY DATA: Never overwrite a field once it has a non-null value.
+        const nameVal = currentLeadData?.name || extracted_data.name || 'Visitor';
+        const companyVal = currentLeadData?.company || extracted_data.company || 'Unknown';
+        const budgetVal = Number(String(currentLeadData?.budget || extracted_data.budget || 0).replace(/[^0-9.-]+/g,"")) || 0;
+        const teamVal = parseInt(String(currentLeadData?.teamSize || extracted_data.teamSize || 0), 10) || 0;
+        const timelineVal = currentLeadData?.timeline || extracted_data.timeline || '';
+        const demoTimeVal = currentLeadData?.demoTime || extracted_data.demoTime || '';
 
-        // Logic-based State Transition
+        // Deterministic State Management
         let nextStage: LeadStage = currentLeadData?.stage || 'collecting';
         
-        const knownFieldsCount = [nameStr !== 'Visitor', companyStr !== 'Unknown', teamNum > 0, budgetNum > 0, timelineStr !== ''].filter(Boolean).length;
+        // Qualification Check: 3+ fields known (budget, timeline, teamSize are key)
+        const keyFieldsKnown = [budgetVal > 0, timelineVal !== '', teamVal > 0].filter(Boolean).length;
+        if (nextStage === 'collecting' && keyFieldsKnown >= 2) nextStage = 'qualified';
         
-        if (nextStage === 'collecting' && knownFieldsCount >= 3) nextStage = 'qualified';
         if (action === 'suggest') nextStage = 'proposed';
-        if (action === 'booked') nextStage = 'booked';
-        if (nextStage === 'booked') nextStage = 'completed'; // Move to completed immediately after booking message
+        
+        if (action === 'booked' || (demoTimeVal && keyFieldsKnown >= 3)) {
+          nextStage = 'completed'; // Booking finalized
+        }
 
         const leadData = {
-          name: nameStr,
-          company: companyStr,
-          teamSize: teamNum,
-          budget: budgetNum,
-          timeline: timelineStr,
-          score: calculateScore(budgetNum, teamNum, timelineStr),
+          name: nameVal,
+          company: companyVal,
+          teamSize: teamVal,
+          budget: budgetVal,
+          timeline: timelineVal,
+          demoTime: demoTimeVal,
+          score: calculateScore(budgetVal, teamVal, timelineVal),
           stage: nextStage,
           updatedAt: Date.now()
         };
@@ -235,15 +238,16 @@ Return JSON:
       }
     }
 
-    // 8. Return final response
+    // 8. Final Response
     trace("Success - Returning Response");
-    return Response.json({ reply: reply || "How can I help you?", action });
+    return Response.json({ 
+      reply: reply || "I'm here to help you get started with OrbitLead!", 
+      action: action 
+    });
 
   } catch (fatalError: any) {
     console.error("[API] FATAL ERROR:", fatalError);
-    return Response.json({ 
-      reply: "A server error occurred. Please refresh and try again." 
-    }, { status: 500 });
+    return Response.json({ reply: "A system error occurred. Please refresh the page." }, { status: 500 });
   }
 }
 

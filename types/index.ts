@@ -12,6 +12,8 @@ export interface Lead {
   createdAt: number;
   conversationId?: string;
   notes?: string;
+  demoTime?: string;
+  intent?: string;
 }
 
 export type Role = 'user' | 'assistant' | 'system';
@@ -27,6 +29,7 @@ export interface Conversation {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  leadId?: string;
 }
 
 export interface LeadExtraction {
@@ -35,4 +38,6 @@ export interface LeadExtraction {
   teamSize?: string | number;
   budget?: string | number;
   timeline?: string;
+  demoTime?: string;
+  intent?: string;
 }
