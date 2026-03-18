@@ -65,9 +65,10 @@ export async function POST(req: Request) {
       }
     }
 
-    // 4. Fetch Conversation History
+    // 4. Fetch Conversation History & Lead State
     let history = [];
     let convSnap;
+    let currentLeadData = null;
     try {
       if (conversationId) {
         trace("Firestore History Fetch Started");
@@ -76,11 +77,19 @@ export async function POST(req: Request) {
         if (convSnap.exists()) {
           history = convSnap.data().messages || [];
           history = history.slice(-10);
+          
+          const leadId = convSnap.data().leadId;
+          if (leadId) {
+            const leadSnap = await getDoc(doc(db, 'leads', leadId));
+            if (leadSnap.exists()) {
+              currentLeadData = leadSnap.data();
+            }
+          }
         }
         trace("Firestore History Fetched");
       }
     } catch (historyError) {
-      console.error("[API] Error fetching history:", historyError);
+      console.error("[API] Error fetching history/lead:", historyError);
     }
 
     // 5. Initialize Groq & Call AI
@@ -89,18 +98,41 @@ export async function POST(req: Request) {
     let aiResponseContent = "";
 
     try {
-      const starterPrice = pricingConfig.Starter.toLocaleString('en-IN');
-      const growthPrice = pricingConfig.Growth.toLocaleString('en-IN');
-      const enterprisePrice = pricingConfig.Enterprise.toLocaleString('en-IN');
+      const sp = pricingConfig.Starter;
+      const gp = pricingConfig.Growth;
+      const ep = pricingConfig.Enterprise;
+
+      const leadSummary = currentLeadData ? 
+        `Current known data: Name: ${currentLeadData.name || 'Unknown'}, Company: ${currentLeadData.company || 'Unknown'}, Team: ${currentLeadData.teamSize || 'Unknown'}, Budget: ${currentLeadData.budget || 'Unknown'}, Timeline: ${currentLeadData.timeline || 'Unknown'}` : 
+        "No prior lead data.";
 
       const systemPrompt = `
-You are the OrbitLead AI Sales Assistant. Your goal is to engage the user and extract lead info (name, company, team size, budget, timeline).
-Suggest pricing: Starter (₹${starterPrice}), Growth (₹${growthPrice}), Enterprise (₹${enterprisePrice}).
+You are the OrbitLead AI Sales Assistant. Your goal is to move the user through this structured flow:
+1. Collect Required Data (name, company, teamSize, budget, timeline)
+2. Qualify & Suggest Plan
+3. Book Demo (if intent shown)
+4. End Conversation Cleanly
 
-Return ONLY a JSON object with:
+REQUIRED FIELDS: name, company, teamSize, budget, timeline.
+
+LOGIC RULES:
+- MEMORY AWARENESS: ${leadSummary}. NEVER ask for a field already known.
+- STOP ASKING RULE: Once you have at least 3 key fields (teamSize, budget, timeline), STOP asking questions. Move to plan suggestion.
+- PLAN SUGGESTION: Suggest ONLY based on budget:
+  * Budget < ₹${sp}: Starter Plan (₹${sp.toLocaleString('en-IN')}/mo)
+  * Budget between ₹${sp} & ₹${gp}: Growth Plan (₹${gp.toLocaleString('en-IN')}/mo)
+  * Budget > ₹${gp}: Enterprise Plan (₹${ep.toLocaleString('en-IN')}/mo)
+- BOOKING TRIGGER: If user expresses intent to "book", "schedule", "demo", "meeting", "call":
+  * IF data missing: Ask ONLY for the specific missing fields.
+  * IF sufficient data (teamSize, budget, timeline): Set "action": "booked" and confirm.
+- CONVERSATION END: After booking, summarize the lead, confirm the booking, and DO NOT ask more questions.
+- BE CONCISE: Avoid generic questions like "tell me more about your company". Use the user's name.
+
+Return ONLY JSON:
 {
-  "reply": "your message to the user",
-  "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "timeline": "...", "booking_confirmed": boolean }
+  "reply": "your concise message",
+  "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "timeline": "..." },
+  "action": "ask" | "suggest" | "booked"
 }
 `;
 
@@ -113,8 +145,8 @@ Return ONLY a JSON object with:
           })),
           { role: 'user', content: message }
         ],
-        model: 'llama-3.1-8b-instant', // Faster model
-        temperature: 0.1, // Faster/Deterministic
+        model: 'llama-3.1-8b-instant',
+        temperature: 0.1,
         response_format: { type: 'json_object' }
       });
 
@@ -138,23 +170,24 @@ Return ONLY a JSON object with:
       });
     }
 
-    const { reply, extracted_data } = parsedAI;
+    const { reply, extracted_data, action } = parsedAI;
 
     // 7. Process Lead Data safely
     if (extracted_data && conversationId) {
       trace("Firestore Lead Update Started");
       try {
-        const budgetNum = Number(String(extracted_data.budget || 0).replace(/[^0-9.-]+/g,"")) || 0;
-        const teamNum = parseInt(String(extracted_data.teamSize || 0), 10) || 0;
-        const timelineStr = String(extracted_data.timeline || '');
+        const budgetNum = Number(String(extracted_data.budget || currentLeadData?.budget || 0).replace(/[^0-9.-]+/g,"")) || 0;
+        const teamNum = parseInt(String(extracted_data.teamSize || currentLeadData?.teamSize || 0), 10) || 0;
+        const timelineStr = String(extracted_data.timeline || currentLeadData?.timeline || '');
         const newScore = calculateScore(budgetNum, teamNum, timelineStr);
         
-        let calculatedStage: LeadStage = newScore >= 40 ? 'qualified' : 'new';
-        if (extracted_data.booking_confirmed === true) calculatedStage = 'booked';
+        let calculatedStage: LeadStage = currentLeadData?.stage || 'new';
+        if (newScore >= 40 && calculatedStage === 'new') calculatedStage = 'qualified';
+        if (action === 'booked') calculatedStage = 'booked';
 
         const leadData = {
-          name: extracted_data.name || 'Visitor',
-          company: extracted_data.company || 'Unknown',
+          name: extracted_data.name || currentLeadData?.name || 'Visitor',
+          company: extracted_data.company || currentLeadData?.company || 'Unknown',
           teamSize: teamNum,
           budget: budgetNum,
           timeline: timelineStr,
