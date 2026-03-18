@@ -37,7 +37,7 @@ export default function SettingsPage() {
 
     const fetchPricing = async () => {
       try {
-        const docRef = doc(db, "config", "pricing");
+        const docRef = doc(db, "settings", "pricing");
         const docSnap = await getDoc(docRef);
         
         if (docSnap.exists()) {
@@ -64,12 +64,15 @@ export default function SettingsPage() {
     setSuccessMsg("");
     
     try {
-      await setDoc(doc(db, "config", "pricing"), pricing);
+      await setDoc(doc(db, "settings", "pricing"), pricing);
       setSuccessMsg("Pricing updated successfully!");
       setTimeout(() => setSuccessMsg(""), 3000);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Failed to save pricing config:", error);
-      alert("Failed to save configuration. Please check your connection and try again.");
+      const errorMsg = error.code === 'permission-denied' 
+        ? "Permission denied. Please check your Firestore security rules." 
+        : (error.message || "Unknown error occurred.");
+      alert(`Failed to save configuration: ${errorMsg}`);
     } finally {
       setSaving(false);
     }

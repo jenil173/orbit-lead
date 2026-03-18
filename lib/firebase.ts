@@ -16,4 +16,11 @@ const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
+// Check for missing critical environment variables in the client
+if (typeof window !== "undefined") {
+  if (!process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID) {
+    console.error("Firebase Initialization: NEXT_PUBLIC_FIREBASE_PROJECT_ID is missing. Firestore will not work.");
+  }
+}
+
 export { app, auth, db };
