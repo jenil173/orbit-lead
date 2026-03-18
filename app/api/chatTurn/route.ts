@@ -157,20 +157,25 @@ Your MISSION: Progress leads through the funnel: collecting → qualified → pr
           { role: 'system', content: systemPrompt },
           ...history.map((m: any) => ({
             role: m.role === 'assistant' ? 'assistant' : 'user',
-            content: m.content
-          })),
+            content: m.content || ""
+          })).filter(m => m.content.trim() !== ""),
           { role: 'user', content: message }
         ],
-        model: 'llama-3.1-8b-instant',
+        model: 'llama-3.3-70b-versatile',
         temperature: 0.1,
         response_format: { type: 'json_object' }
       });
 
       aiResponseContent = completion.choices[0]?.message?.content || "{}";
       trace("Groq AI Call Completed");
-    } catch (aiError) {
+    } catch (aiError: any) {
       console.error("[API] Groq API failure:", aiError);
-      return Response.json({ reply: "Service is temporarily unavailable. Please try again in a moment." }, { status: 503 });
+      const isAuthError = aiError?.status === 401 || String(aiError).includes('invalid_api_key');
+      return Response.json({ 
+        reply: isAuthError 
+          ? "AI configuration error: Invalid API Key. Please check your environment variables." 
+          : "The AI service is currently busy. Please try again in a few seconds." 
+      }, { status: aiError?.status || 503 });
     }
 
     // 6. Parse AI Response safely
