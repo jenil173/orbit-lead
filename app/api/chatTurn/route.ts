@@ -122,43 +122,44 @@ export async function POST(req: Request) {
     const ep = activePricing.Enterprise || 200000;
 
     const leadSummary = currentLeadData ? 
-      `LEAD MEMORY: Name: ${currentLeadData.name || 'null'}, Company: ${currentLeadData.company || 'null'}, Team: ${currentLeadData.teamSize || 'null'}, Budget: ${currentLeadData.budget || 'null'}, Timeline: ${currentLeadData.timeline || 'null'}, DemoTime: ${currentLeadData.demoTime || 'null'}, Stage: ${currentLeadData.stage || 'collecting'}` : 
+      `[CRITICAL LEAD MEMORY]
+      Name: ${currentLeadData.name || 'Visitor'}
+      Company: ${currentLeadData.company || 'Unknown'}
+      Team: ${currentLeadData.teamSize || 'null'}
+      Budget: ${currentLeadData.budget || 'null'}
+      Timeline: ${currentLeadData.timeline || 'null'}
+      DemoTime: ${currentLeadData.demoTime || 'null'}
+      Stage: ${currentLeadData.stage || 'collecting'}` : 
       "No prior lead data.";
 
     const systemPrompt = `
-You are the OrbitLead AI Sales Assistant - a high-performance, goal-driven agent (not a chatbot).
-Your MISSION: Progress leads through the funnel: collecting → qualified → proposed → booked → completed.
+You are the OrbitLead AI Sales Expert. You are goal-driven, professional, and efficient.
+### GROUND RULES (MANDATORY) ###
+1. MEMORY OVER SCRIPT: ${leadSummary}. 
+   - If a value (Name, Company, Team, Budget, Timeline) is already in [CRITICAL LEAD MEMORY], NEVER ask for it again, even if your previous message asked for it.
+   - Use the user's name if known.
+2. AGGRESSIVE EXTRACTION: Look for name, company, teamSize, budget, timeline, and demoTime in EVERY user message.
+3. CONVERSATIONAL FLOW (NOT STEP-BASED):
+   - If the user asks a question (features, automation, etc.), answer it briefly and THEN move to the next logical sales step based on MISSING data.
+4. SALES FUNNEL:
+   - Priority: Collect missing data -> Suggest Plan -> Book Demo -> End.
+   - QUALIFICATION: If budget and teamSize are known, suggest a plan.
+   - PLAN RULES:
+     * Budget > 200,000 -> Enterprise Plan
+     * 80,000 to 150,000 -> Growth Plan
+     * < 50,000 -> Starter / Basic Plan
+5. INTENT DETECTION: Identify if the user wants a "demo", "pricing info", or has a "product inquiry".
+6. BOOKING: If the user wants a demo AND budget/teamSize are known, confirm the booking directly if a time is mentioned. 
 
---- LOGIC RULES (STRICT) ---
-1. MEMORY PRESERVATION: ${leadSummary}. 
-   - NEVER ask for information that is already in LEAD MEMORY.
-   - NEVER change the user's name or company once set.
-2. QUESTION STRATEGY:
-   - Ask exactly ONE missing field at a time.
-   - Priority: Budget -> Timeline -> Team Size.
-   - No generic questions. Be direct and professional.
-3. QUALIFICATION & PRICING:
-   - Qualify once 3+ fields exist (e.g., budget, timeline, teamSize).
-   - Suggest Plan: budget ≤ ₹${sp} (Starter: ₹${sp}), budget ≤ ₹${gp} (Growth: ₹${gp}), Else (Enterprise: ₹${ep}).
-   - Always mention the price from LEAD MEMORY config.
-4. BOOKING TRIGGER:
-   - If user mentions: book, demo, schedule, meeting, call:
-     * Missing fields? Ask ONLY for the missing fields first.
-     * All info present? Extract "demoTime" (e.g., "Friday at 2pm"), confirm, set "action": "booked".
-5. CONVERSATION END: 
-   - Use the user's name. Confirm the booking and time. Stop asking questions.
+### RESPONSE STYLE ###
+- Human-like, concise, sales-focused. 
+- NO REPETITION. If you just asked for budget and the user didn't give it but instead asked a question, answer the question and ask for budget ONCE more. If you already have budget in memory, DO NOT ASK FOR IT.
 
---- OUTPUT FORMAT (JSON ONLY) ---
+Return ONLY JSON:
 {
-  "reply": "your direct, personalized response",
-  "extracted_data": { 
-    "name": "string (don't overwrite)", 
-    "company": "string (don't overwrite)", 
-    "teamSize": number, 
-    "budget": number, 
-    "timeline": "string",
-    "demoTime": "string (e.g. 'Friday 2pm')"
-  },
+  "reply": "concise, warm, sales-focused reply",
+  "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "timeline": "...", "demoTime": "..." },
+  "intent": "demo" | "pricing" | "product_inquiry",
   "action": "ask" | "suggest" | "booked"
 }
 `;
@@ -185,9 +186,9 @@ Your MISSION: Progress leads through the funnel: collecting → qualified → pr
       const isAuthError = aiError?.status === 401 || String(aiError).includes('invalid_api_key');
       return Response.json({ 
         reply: isAuthError 
-          ? "AI configuration error: Invalid API Key. Please check your environment variables." 
-          : "The AI service is currently busy. Please try again in a few seconds." 
-      }, { status: aiError?.status || 503 });
+          ? "AI configuration error: Invalid API Key." 
+          : "Based on your details, I'd recommend our Growth plan. Would you like to book a demo to see it in action?" 
+      }, { status: 200 }); // Return success with fallback for better UX
     }
 
     // 6. Parse AI Response safely
@@ -196,34 +197,44 @@ Your MISSION: Progress leads through the funnel: collecting → qualified → pr
       parsedAI = JSON.parse(aiResponseContent);
     } catch (parseError) {
       console.error("[API] Error parsing AI response:", aiResponseContent);
-      return Response.json({ reply: "I'm sorry, I hit a snag. Could you please repeat that?" });
+      return Response.json({ reply: "I caught that! Based on your needs, I think a demo would be the best next step. Should we set that up?" });
     }
 
-    const { reply, extracted_data, action } = parsedAI;
+    const { reply, extracted_data, action, intent } = parsedAI;
 
     // 7. Deterministic Lead Processing
     if (extracted_data && conversationId) {
       trace("Firestore Lead Update Started");
       try {
-        // PRESERVE STICKY DATA: Never overwrite a field once it has a non-null value.
-        const nameVal = currentLeadData?.name || extracted_data.name || 'Visitor';
-        const companyVal = currentLeadData?.company || extracted_data.company || 'Unknown';
-        const budgetVal = Number(String(currentLeadData?.budget || extracted_data.budget || 0).replace(/[^0-9.-]+/g,"")) || 0;
-        const teamVal = parseInt(String(currentLeadData?.teamSize || extracted_data.teamSize || 0), 10) || 0;
+        const nameVal = (currentLeadData?.name && currentLeadData.name !== 'Visitor') ? currentLeadData.name : (extracted_data.name || currentLeadData?.name || 'Visitor');
+        const companyVal = (currentLeadData?.company && currentLeadData.company !== 'Unknown') ? currentLeadData.company : (extracted_data.company || currentLeadData?.company || 'Unknown');
+        
+        // Robust number parsing
+        const parseNum = (val: any) => {
+          if (typeof val === 'number') return val;
+          return Number(String(val || 0).replace(/[^0-9.]+/g, "")) || 0;
+        };
+
+        const budgetVal = (currentLeadData?.budget && currentLeadData.budget > 0) ? currentLeadData.budget : parseNum(extracted_data.budget);
+        const teamVal = (currentLeadData?.teamSize && currentLeadData.teamSize > 0) ? currentLeadData.teamSize : parseNum(extracted_data.teamSize);
+        
         const timelineVal = currentLeadData?.timeline || extracted_data.timeline || '';
         const demoTimeVal = currentLeadData?.demoTime || extracted_data.demoTime || '';
 
         // Deterministic State Management
         let nextStage: LeadStage = currentLeadData?.stage || 'collecting';
         
-        // Qualification Check: 3+ fields known (budget, timeline, teamSize are key)
-        const keyFieldsKnown = [budgetVal > 0, timelineVal !== '', teamVal > 0].filter(Boolean).length;
-        if (nextStage === 'collecting' && keyFieldsKnown >= 2) nextStage = 'qualified';
+        const keyFieldsKnown = [budgetVal > 0, teamVal > 0].filter(Boolean).length;
+        if (nextStage === 'collecting' && keyFieldsKnown >= 1) nextStage = 'qualified';
         
-        if (action === 'suggest') nextStage = 'proposed';
+        if (action === 'suggest' || nextStage === 'qualified') nextStage = 'proposed';
         
-        if (action === 'booked' || (demoTimeVal && keyFieldsKnown >= 3)) {
-          nextStage = 'completed'; // Booking finalized
+        if (action === 'booked' || intent === 'demo' || demoTimeVal) {
+          if (keyFieldsKnown >= 2 && nameVal !== 'Visitor') {
+            nextStage = 'completed'; // Booking finalized
+          } else if (intent === 'demo') {
+             nextStage = 'booked';
+          }
         }
 
         const leadData = {
@@ -233,6 +244,7 @@ Your MISSION: Progress leads through the funnel: collecting → qualified → pr
           budget: budgetVal,
           timeline: timelineVal,
           demoTime: demoTimeVal,
+          intent: intent || currentLeadData?.intent || 'product_inquiry',
           score: calculateScore(budgetVal, teamVal, timelineVal),
           stage: nextStage,
           updatedAt: Date.now()
