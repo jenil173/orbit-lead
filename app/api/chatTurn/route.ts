@@ -66,9 +66,9 @@ export async function POST(req: Request) {
     }
 
     // 4. Fetch Conversation History & Lead State
-    let history = [];
+    let history: Message[] = [];
     let convSnap;
-    let currentLeadData = null;
+    let currentLeadData: any = null;
     try {
       if (conversationId) {
         trace("Firestore History Fetch Started");
@@ -92,45 +92,63 @@ export async function POST(req: Request) {
       console.error("[API] Error fetching history/lead:", historyError);
     }
 
+    // TERMINATION RULE: If state is completed, STOP.
+    if (currentLeadData?.stage === 'completed') {
+      return Response.json({ 
+        reply: `Thanks for your interest, ${currentLeadData.name}! Our team will be in touch soon regarding your ${currentLeadData.stage} demo.`,
+        action: "completed"
+      });
+    }
+
     // 5. Initialize Groq & Call AI
     trace("Groq AI Call Started");
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY?.trim() });
     let aiResponseContent = "";
 
     try {
-      const sp = pricingConfig.Starter;
-      const gp = pricingConfig.Growth;
-      const ep = pricingConfig.Enterprise;
+      const sp = pricingConfig.Starter || 50000;
+      const gp = pricingConfig.Growth || 100000;
+      const ep = pricingConfig.Enterprise || 200000;
 
       const leadSummary = currentLeadData ? 
-        `Current known data: Name: ${currentLeadData.name || 'Unknown'}, Company: ${currentLeadData.company || 'Unknown'}, Team: ${currentLeadData.teamSize || 'Unknown'}, Budget: ${currentLeadData.budget || 'Unknown'}, Timeline: ${currentLeadData.timeline || 'Unknown'}` : 
+        `KNOWN DATA: Name: ${currentLeadData.name || 'null'}, Company: ${currentLeadData.company || 'null'}, Team: ${currentLeadData.teamSize || 'null'}, Budget: ${currentLeadData.budget || 'null'}, Timeline: ${currentLeadData.timeline || 'null'}, Stage: ${currentLeadData.stage || 'collecting'}` : 
         "No prior lead data.";
 
       const systemPrompt = `
-You are the OrbitLead AI Sales Assistant. Your goal is to move the user through this structured flow:
-1. Collect Required Data (name, company, teamSize, budget, timeline)
-2. Qualify & Suggest Plan
-3. Book Demo (if intent shown)
-4. End Conversation Cleanly
+You are a deterministic AI Sales Agent. NOT a chatbot. Follow these STRICT rules:
 
-REQUIRED FIELDS: name, company, teamSize, budget, timeline.
+STATE MACHINE: collecting → qualified → proposed → booked → completed
 
-LOGIC RULES:
-- MEMORY AWARENESS: ${leadSummary}. NEVER ask for a field already known.
-- STOP ASKING RULE: Once you have at least 3 key fields (teamSize, budget, timeline), STOP asking questions. Move to plan suggestion.
-- PLAN SUGGESTION: Suggest ONLY based on budget:
-  * Budget < ₹${sp}: Starter Plan (₹${sp.toLocaleString('en-IN')}/mo)
-  * Budget between ₹${sp} & ₹${gp}: Growth Plan (₹${gp.toLocaleString('en-IN')}/mo)
-  * Budget > ₹${gp}: Enterprise Plan (₹${ep.toLocaleString('en-IN')}/mo)
-- BOOKING TRIGGER: If user expresses intent to "book", "schedule", "demo", "meeting", "call":
-  * IF data missing: Ask ONLY for the specific missing fields.
-  * IF sufficient data (teamSize, budget, timeline): Set "action": "booked" and confirm.
-- CONVERSATION END: After booking, summarize the lead, confirm the booking, and DO NOT ask more questions.
-- BE CONCISE: Avoid generic questions like "tell me more about your company". Use the user's name.
+DATA EXTRACTION:
+- Extract: name, company, teamSize (number), budget (number), timeline.
+- ${leadSummary}
+- NEVER overwrite or ask for a field already known.
+- NEVER change the user's name once set.
 
-Return ONLY JSON:
+QUESTION STRATEGY:
+- Ask ONLY ONE specific missing field at a time.
+- Priority: 1. budget, 2. timeline, 3. teamSize.
+- NO generic questions like "tell me more".
+
+QUALIFICATION:
+- If 3+ fields exist (e.g., teamSize, budget, timeline) AND stage is "collecting" → transition to "qualified".
+
+PLAN SUGGESTION:
+- Suggest ONLY if stage is "qualified" or "proposed".
+- Logic: Budget ≤ ${sp} → Starter (₹${sp}), Budget ≤ ${gp} → Growth (₹${gp}), else Enterprise (₹${ep}).
+- If proposing, set "action": "suggest".
+
+BOOKING LOGIC:
+- If user mentions: book, schedule, demo, meeting, call:
+  * IF data missing: Ask ONLY the missing field.
+  * IF info sufficient: Confirm booking, use user's name, set "action": "booked", set stage to "booked".
+
+RESPONSE STYLE:
+- Short, professional, direct. Use user's name. No loops.
+
+Return JSON:
 {
-  "reply": "your concise message",
+  "reply": "string",
   "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "timeline": "..." },
   "action": "ask" | "suggest" | "booked"
 }
@@ -154,9 +172,7 @@ Return ONLY JSON:
       trace("Groq AI Call Completed");
     } catch (aiError) {
       console.error("[API] Groq API failure:", aiError);
-      return Response.json({ 
-        reply: "AI is temporarily unavailable. Please try again." 
-      }, { status: 503 });
+      return Response.json({ reply: "Service temporarily unavailable." }, { status: 503 });
     }
 
     // 6. Parse AI Response safely
@@ -165,41 +181,47 @@ Return ONLY JSON:
       parsedAI = JSON.parse(aiResponseContent);
     } catch (parseError) {
       console.error("[API] Error parsing AI response:", aiResponseContent);
-      return Response.json({ 
-        reply: "I encountered a formatting error. Could you repeat that?" 
-      });
+      return Response.json({ reply: "I encountered an error. Could you repeat that?" });
     }
 
     const { reply, extracted_data, action } = parsedAI;
 
-    // 7. Process Lead Data safely
+    // 7. Process Lead Data & State Transitions
     if (extracted_data && conversationId) {
       trace("Firestore Lead Update Started");
       try {
-        const budgetNum = Number(String(extracted_data.budget || currentLeadData?.budget || 0).replace(/[^0-9.-]+/g,"")) || 0;
-        const teamNum = parseInt(String(extracted_data.teamSize || currentLeadData?.teamSize || 0), 10) || 0;
-        const timelineStr = String(extracted_data.timeline || currentLeadData?.timeline || '');
-        const newScore = calculateScore(budgetNum, teamNum, timelineStr);
+        // Deterministic Extraction (NEVER overwrite)
+        const budgetNum = Number(String(currentLeadData?.budget || extracted_data.budget || 0).replace(/[^0-9.-]+/g,"")) || 0;
+        const teamNum = parseInt(String(currentLeadData?.teamSize || extracted_data.teamSize || 0), 10) || 0;
+        const timelineStr = String(currentLeadData?.timeline || extracted_data.timeline || '');
+        const nameStr = String(currentLeadData?.name || extracted_data.name || 'Visitor');
+        const companyStr = String(currentLeadData?.company || extracted_data.company || 'Unknown');
+
+        // Logic-based State Transition
+        let nextStage: LeadStage = currentLeadData?.stage || 'collecting';
         
-        let calculatedStage: LeadStage = currentLeadData?.stage || 'new';
-        if (newScore >= 40 && calculatedStage === 'new') calculatedStage = 'qualified';
-        if (action === 'booked') calculatedStage = 'booked';
+        const knownFieldsCount = [nameStr !== 'Visitor', companyStr !== 'Unknown', teamNum > 0, budgetNum > 0, timelineStr !== ''].filter(Boolean).length;
+        
+        if (nextStage === 'collecting' && knownFieldsCount >= 3) nextStage = 'qualified';
+        if (action === 'suggest') nextStage = 'proposed';
+        if (action === 'booked') nextStage = 'booked';
+        if (nextStage === 'booked') nextStage = 'completed'; // Move to completed immediately after booking message
 
         const leadData = {
-          name: extracted_data.name || currentLeadData?.name || 'Visitor',
-          company: extracted_data.company || currentLeadData?.company || 'Unknown',
+          name: nameStr,
+          company: companyStr,
           teamSize: teamNum,
           budget: budgetNum,
           timeline: timelineStr,
-          score: newScore,
-          stage: calculatedStage,
+          score: calculateScore(budgetNum, teamNum, timelineStr),
+          stage: nextStage,
           updatedAt: Date.now()
         };
 
         const existingLeadId = convSnap?.data()?.leadId;
         if (existingLeadId) {
           await updateDoc(doc(db, 'leads', existingLeadId), leadData);
-        } else if (Object.values(extracted_data).some(v => v && v !== false)) {
+        } else {
           const leadRef = await addDoc(collection(db, 'leads'), {
             ...leadData,
             createdAt: Date.now(),
@@ -215,7 +237,7 @@ Return ONLY JSON:
 
     // 8. Return final response
     trace("Success - Returning Response");
-    return Response.json({ reply: reply || "I'm here to help!" });
+    return Response.json({ reply: reply || "How can I help you?", action });
 
   } catch (fatalError: any) {
     console.error("[API] FATAL ERROR:", fatalError);

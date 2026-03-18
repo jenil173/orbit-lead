@@ -1,4 +1,4 @@
-export type LeadStage = 'new' | 'qualified' | 'proposal_sent' | 'booked' | 'won' | 'lost';
+export type LeadStage = 'collecting' | 'qualified' | 'proposed' | 'booked' | 'completed';
 
 export interface Lead {
   id: string;
@@ -11,6 +11,7 @@ export interface Lead {
   stage: LeadStage;
   createdAt: number;
   conversationId?: string;
+  notes?: string;
 }
 
 export type Role = 'user' | 'assistant' | 'system';
