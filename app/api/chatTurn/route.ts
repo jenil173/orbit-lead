@@ -75,8 +75,7 @@ export async function POST(req: Request) {
         const convRef = doc(db, 'conversations', conversationId);
         convSnap = await getDoc(convRef);
         if (convSnap.exists()) {
-          history = convSnap.data().messages || [];
-          history = history.slice(-10);
+          const rawHistory = convSnap.data().messages || [];
           
           const leadId = convSnap.data().leadId;
           if (leadId) {
@@ -85,8 +84,22 @@ export async function POST(req: Request) {
               currentLeadData = leadSnap.data();
             }
           }
+
+          // === HISTORY PRUNING (IRONCLAD GUARD) ===
+          // Filter history to remove assistant messages that re-ask for known data.
+          // This prevents "Completion Bias" where the AI follows its own bad previous turn.
+          history = rawHistory.filter((m: any) => {
+            if (m.role === 'assistant' && currentLeadData) {
+              const content = m.content.toLowerCase();
+              if (currentLeadData.budget > 0 && (content.includes('budget') || content.includes('monthly') || content.includes('₹'))) return false;
+              if (currentLeadData.teamSize > 0 && (content.includes('team') || content.includes('members'))) return false;
+              if (currentLeadData.timeline && (content.includes('timeline') || content.includes('when') || content.includes('weeks'))) return false;
+              if (currentLeadData.name && currentLeadData.name !== 'Visitor' && (content.includes('your name') || content.includes('who are you'))) return false;
+            }
+            return true;
+          }).slice(-6); // Keep only the most relevant, non-repetitive history
         }
-        trace("Firestore History Fetched");
+        trace("Firestore History Fetched & Pruned");
       }
     } catch (historyError) {
       console.error("[API] Error fetching history/lead:", historyError);
@@ -121,6 +134,23 @@ export async function POST(req: Request) {
     const gp = activePricing.Growth || 100000;
     const ep = activePricing.Enterprise || 200000;
 
+    // === MILESTONE INJECTION (IRONCLAD GUARD) ===
+    let nextMilestone = "COLLECT_INFO";
+    const missingFields = [];
+    if (!currentLeadData?.budget || currentLeadData.budget === 0) missingFields.push('BUDGET');
+    if (!currentLeadData?.timeline || currentLeadData.timeline === '') missingFields.push('TIMELINE');
+    if (!currentLeadData?.teamSize || currentLeadData.teamSize === 0) missingFields.push('TEAM_SIZE');
+    if (!currentLeadData?.name || currentLeadData.name === 'Visitor') missingFields.push('NAME');
+
+    if (missingFields.length === 0) nextMilestone = "PROPOSE_PLAN_AND_BOOK (All info collected)";
+    else if (currentLeadData?.budget && currentLeadData?.teamSize) nextMilestone = "PROPOSE_SPECIFIC_PLAN";
+    else nextMilestone = `COLLECT_${missingFields[0]}`;
+
+    const knownList = currentLeadData ? Object.entries(currentLeadData)
+      .filter(([k, v]) => v && v !== 'null' && v !== 'Visitor' && v !== 'Unknown' && v !== 0)
+      .map(([k]) => k.toUpperCase())
+      .join(', ') : "None";
+
     const leadSummary = currentLeadData ? 
       `[LEAD MEMORY - DO NOT ASK THESE AGAIN]
       - Name: ${currentLeadData.name || 'Visitor'}
@@ -134,20 +164,14 @@ export async function POST(req: Request) {
     // AGGRESSIVE SYSTEM PROMPT
     const systemPrompt = `
 You are the OrbitLead AI Sales PRO. You are deterministic, efficient, and never repeat yourself.
-Your MISSION: Qualify leads and book demos.
+### MISSION OBJECTIVE ###
+Current Milestone: ${nextMilestone}
+KNOWN FIELDS (FORBIDDEN TO ASK): ${knownList}
 
-### CRITICAL INSTRUCTION (MEMORY SENTINEL) ###
-- ALWAYS check the [LEAD MEMORY] provided in the next system message.
-- IF A FIELD HAS A VALUE (not 'Visitor', 'Unknown', or 'null'), it is FORBIDDEN to ask for it. 
-- Even if your previous message asked for it, if the value is now in memory, move to the NEXT missing field.
-- If you ask for a known field, you fail your mission and the user will leave.
-
-### CONVERSATION FLOW ###
-1. Greet Arjun/Lead (only if Name is known).
-2. Answer user questions briefly.
-3. Identify MISSING data (Budget -> Timeline -> Team Size).
-4. If Budget and Team are known: Suggest Plan (Enterprise > 200k, Growth 80k-150k, Basic < 50k).
-5. If intent is "demo": Ask missing info OR confirm booking if all data is present.
+### CRITICAL RULES ###
+1. FORBIDDEN QUESTIONS: DO NOT ask for ${knownList}. If you do, the session fails.
+2. CONTEXT OVER HISTORY: Ignore your previous questions in chat history if the data is now in [LEAD MEMORY].
+3. FLOW: Greet by name -> Answer question -> Move to ${nextMilestone}.
 
 Return ONLY JSON:
 {
@@ -209,9 +233,16 @@ Return ONLY JSON:
         const nameVal = (currentLeadData?.name && currentLeadData.name !== 'Visitor') ? currentLeadData.name : (extracted_data.name || 'Visitor');
         const companyVal = (currentLeadData?.company && currentLeadData.company !== 'Unknown') ? currentLeadData.company : (extracted_data.company || 'Unknown');
         
+        // Robust number parsing - FIXED for ranges (e.g. "30k to 70k")
         const parseNum = (val: any) => {
           if (typeof val === 'number') return val;
-          return Number(String(val || 0).replace(/[^0-9.]+/g, "")) || 0;
+          const matches = String(val || "").match(/\d+/g);
+          if (matches && matches.length > 0) {
+            let num = Number(matches[0]);
+            if (String(val).toLowerCase().includes('k') && num < 1000) num *= 1000;
+            return num;
+          }
+          return 0;
         };
 
         const budgetVal = (currentLeadData?.budget && currentLeadData.budget > 0) ? currentLeadData.budget : parseNum(extracted_data.budget);
@@ -224,14 +255,18 @@ Return ONLY JSON:
         let nextStage: LeadStage = currentLeadData?.stage || 'collecting';
         const keyFieldsKnown = [budgetVal > 0, teamVal > 0, timelineVal !== ''].filter(Boolean).length;
         
+        // Qualification: 2+ key fields
         if (nextStage === 'collecting' && keyFieldsKnown >= 2) nextStage = 'qualified';
-        if (action === 'suggest' || (budgetVal > 0 && teamVal > 0)) nextStage = 'proposed';
         
+        // Proposal: Budget and Team are known
+        if ((nextStage === 'collecting' || nextStage === 'qualified') && budgetVal > 0 && teamVal > 0) nextStage = 'proposed';
+        
+        // Completion: 3+ fields AND booking intent/time
         if (action === 'booked' || intent === 'demo' || demoTimeVal) {
           if (keyFieldsKnown >= 3 && nameVal !== 'Visitor') {
-            nextStage = 'completed';
+             nextStage = 'completed';
           } else {
-            nextStage = 'booked';
+             nextStage = 'booked';
           }
         }
 
