@@ -1,4 +1,8 @@
+import { NextResponse } from 'next/server';
+import { Groq } from 'groq-sdk';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
+import { LeadStage, Message } from '@/types/index';
+import pricingConfig from '@/pricing_config.json';
 
 // Helper: Server-side Regex Fallback Extraction (The Golden Guard)
 function serverExtract(text: string) {
@@ -305,9 +309,12 @@ Return ONLY JSON:
       action: action 
     });
 
-  } catch (fatal) {
-    console.error("[API] Fatal:", fatal);
-    return Response.json({ reply: "System busy. Please try again." }, { status: 500 });
+  } catch (fatal: any) {
+    console.error("[API] FATAL ERROR CAUGHT:", fatal);
+    if (fatal.stack) console.error("[API] STACK:", fatal.stack);
+    return Response.json({ 
+      reply: "I'm having a bit of trouble connecting to our systems. Could you try sending that again in a moment?" 
+    }, { status: 500 });
   }
 }
 
