@@ -48,6 +48,8 @@ export default function SettingsPage() {
         }
       } catch (error) {
         console.error("Error fetching pricing:", error);
+        // Fallback to default pricing on error to prevent broken UI
+        setPricing(defaultPricing as PricingConfig);
       } finally {
         setFetching(false);
       }
@@ -67,6 +69,7 @@ export default function SettingsPage() {
       setTimeout(() => setSuccessMsg(""), 3000);
     } catch (error) {
       console.error("Failed to save pricing config:", error);
+      alert("Failed to save configuration. Please check your connection and try again.");
     } finally {
       setSaving(false);
     }
@@ -103,7 +106,7 @@ export default function SettingsPage() {
               <Input
                 id="starter"
                 type="number"
-                value={pricing?.Starter || ''}
+                value={pricing?.Starter ?? ''}
                 onChange={(e) => setPricing(prev => prev ? { ...prev, Starter: Number(e.target.value) } : null)}
               />
             </div>
@@ -112,7 +115,7 @@ export default function SettingsPage() {
               <Input
                 id="growth"
                 type="number"
-                value={pricing?.Growth || ''}
+                value={pricing?.Growth ?? ''}
                 onChange={(e) => setPricing(prev => prev ? { ...prev, Growth: Number(e.target.value) } : null)}
               />
             </div>
@@ -121,7 +124,7 @@ export default function SettingsPage() {
               <Input
                 id="enterprise"
                 type="number"
-                value={pricing?.Enterprise || ''}
+                value={pricing?.Enterprise ?? ''}
                 onChange={(e) => setPricing(prev => prev ? { ...prev, Enterprise: Number(e.target.value) } : null)}
               />
             </div>
