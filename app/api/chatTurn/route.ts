@@ -3,7 +3,7 @@ import { Groq } from 'groq-sdk';
 import { db } from '@/lib/firebase';
 import { doc, getDoc, collection, addDoc, updateDoc } from 'firebase/firestore';
 import pricingConfig from '@/pricing_config.json';
-import { LeadStage } from '@/types';
+import { LeadStage, Message } from '@/types';
 import { adminAuth } from '@/lib/firebase-admin';
 
 // Helper for scoring leads
@@ -103,11 +103,23 @@ export async function POST(req: Request) {
     // 5. Initialize Groq & Call AI
     trace("Groq AI Call Started");
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY?.trim() });
+    let aiResponseContent = "";
     
-    // Fallback prices if config is missing
-    const sp = pricingConfig.Starter || 50000;
-    const gp = pricingConfig.Growth || 100000;
-    const ep = pricingConfig.Enterprise || 200000;
+    // Fetch dynamic pricing from Firestore, fallback to JSON
+    let activePricing = pricingConfig;
+    try {
+      const pricingSnap = await getDoc(doc(db, 'settings', 'pricing'));
+      if (pricingSnap.exists()) {
+        activePricing = pricingSnap.data() as any;
+        trace("Dynamic Pricing Fetched");
+      }
+    } catch (pe) {
+      console.error("[API] Error fetching dynamic pricing:", pe);
+    }
+
+    const sp = activePricing.Starter || 50000;
+    const gp = activePricing.Growth || 100000;
+    const ep = activePricing.Enterprise || 200000;
 
     const leadSummary = currentLeadData ? 
       `LEAD MEMORY: Name: ${currentLeadData.name || 'null'}, Company: ${currentLeadData.company || 'null'}, Team: ${currentLeadData.teamSize || 'null'}, Budget: ${currentLeadData.budget || 'null'}, Timeline: ${currentLeadData.timeline || 'null'}, DemoTime: ${currentLeadData.demoTime || 'null'}, Stage: ${currentLeadData.stage || 'collecting'}` : 
@@ -128,7 +140,7 @@ Your MISSION: Progress leads through the funnel: collecting → qualified → pr
 3. QUALIFICATION & PRICING:
    - Qualify once 3+ fields exist (e.g., budget, timeline, teamSize).
    - Suggest Plan: budget ≤ ₹${sp} (Starter: ₹${sp}), budget ≤ ₹${gp} (Growth: ₹${gp}), Else (Enterprise: ₹${ep}).
-   - Always mention the price from currentLeadData.
+   - Always mention the price from LEAD MEMORY config.
 4. BOOKING TRIGGER:
    - If user mentions: book, demo, schedule, meeting, call:
      * Missing fields? Ask ONLY for the missing fields first.
@@ -154,12 +166,12 @@ Your MISSION: Progress leads through the funnel: collecting → qualified → pr
     try {
       const completion = await groq.chat.completions.create({
         messages: [
-          { role: 'system', content: systemPrompt },
+          { role: 'system' as any, content: systemPrompt },
           ...history.map((m: any) => ({
-            role: m.role === 'assistant' ? 'assistant' : 'user',
+            role: (m.role === 'assistant' ? 'assistant' : 'user') as any,
             content: m.content || ""
           })).filter(m => m.content.trim() !== ""),
-          { role: 'user', content: message }
+          { role: 'user' as any, content: message }
         ],
         model: 'llama-3.3-70b-versatile',
         temperature: 0.1,
