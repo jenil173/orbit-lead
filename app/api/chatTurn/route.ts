@@ -17,18 +17,25 @@ function stripQuotes(str: string | undefined): string {
 // Helper: Server-side Regex Fallback Extraction
 function serverExtract(text: string) {
   const data: any = {};
-  const t = text.toLowerCase();
+  const t = text.trim();
+  const lowerT = t.toLowerCase();
   
-  const nameMatch = text.match(/(?:my name is|i'm|i am|this is)\s+([A-Z][a-z]+)/i);
-  if (nameMatch) data.name = nameMatch[1];
+  // 1. Sentence-based Name extraction
+  const nameMatch = t.match(/(?:my name is|i'm|i am|this is|call me)\s+([A-Z]?[a-zA-Z]+)/i);
+  if (nameMatch) {
+    data.name = nameMatch[1];
+  } else if (t.split(/\s+/).length === 1 && t.length > 2) {
+    // 2. Single-word name fallback (if message is just one word like "Arav")
+    data.name = t;
+  }
   
-  const coMatch = text.match(/(?:from|at|with)\s+([A-Z][a-zA-Z0-9]+)/);
+  const coMatch = t.match(/(?:from|at|with)\s+([A-Z][a-zA-Z0-9]+)/);
   if (coMatch) data.company = coMatch[1];
 
-  const teamMatch = t.match(/(\d+)\s*(?:people|team|members|employees)/);
+  const teamMatch = lowerT.match(/(\d+)\s*(?:people|team|members|employees)/);
   if (teamMatch) data.teamSize = parseInt(teamMatch[1], 10);
 
-  const budgetMatch = t.match(/(?:budget|₹|\$)\s*(\d+(?:,\d+)*(?:\s*[kK])?)/);
+  const budgetMatch = lowerT.match(/(?:budget|₹|\$)\s*(\d+(?:,\d+)*(?:\s*[kK])?)/);
   if (budgetMatch) {
      const val = budgetMatch[1].replace(/,/g, '');
      let num = parseInt(val, 10);
@@ -89,9 +96,8 @@ export async function POST(req: Request) {
         const convSnap = await adminDb.collection('conversations').doc(conversationId).get();
         if (convSnap.exists) {
           convData = convSnap.data();
-          // Filter and map history to only valid roles for Groq
           history = (convData.messages || [])
-            .filter((m: any) => ['user', 'assistant', 'system'].includes(m.role))
+            .filter((m: any) => ['user', 'assistant'].includes(m.role))
             .slice(-6)
             .map((m: any) => ({ role: m.role, content: m.content }));
           
@@ -120,17 +126,24 @@ export async function POST(req: Request) {
     const systemPrompt = `
 You are the OrbitLead Sales Assistant.
 CORE MEMORY: ${JSON.stringify(leadState)}
-MATCHED PLAN: ${matchedPlan || "Unknown (Need budget)"}
+PLAN: ${matchedPlan || "Unknown"}
 
-GOAL: Qualify the lead and book a demo.
 STAGES: New -> Qualified -> Proposed -> Booked -> Completed
 
 RULES:
-1. NEVER ask a question if the answer is in CORE MEMORY.
-2. If budget is known, suggest the ${matchedPlan} plan immediately and move stage to Proposed.
-3. If demo intent or time is detected, and we have name + (budget or team), CONFIRM THE DEMO and move stage to Booked.
-4. Keep responses HUMAN, SHORT, and SALES-DRIVEN.
-5. Return ONLY JSON.
+1. NEVER ask for data already in CORE MEMORY.
+2. If name is Visitor, your top priority is getting the user's name.
+3. If budget is known, suggest ${matchedPlan} then move to Proposed.
+4. CONFIRM demo if name + (budget or team) exists and move to Booked.
+5. Return JSON ONLY.
+
+JSON SCHEMA:
+{
+  "reply": "your response",
+  "extracted_data": { "name": string, "company": string, "teamSize": number, "budget": number, "requirement": string, "demoTime": string },
+  "intent": "info"|"budget"|"demo",
+  "action": "ask"|"suggest"|"confirm"
+}
 `;
 
     let aiResult: any;
@@ -138,11 +151,11 @@ RULES:
       const completion = await groq.chat.completions.create({
         messages: [
           { role: 'system', content: systemPrompt },
-          ...(history.length > 0 ? history : []),
+          ...history,
           { role: 'user', content: message }
         ],
         model: 'llama-3.3-70b-versatile',
-        temperature: 0.1,
+        temperature: 0.2,
         response_format: { type: 'json_object' }
       });
       
@@ -164,7 +177,13 @@ RULES:
     };
 
     const merge = (field: string, newValue: any, oldValue: any) => {
-      if (newValue && newValue !== 'Visitor' && newValue !== 'Unknown' && newValue !== 0 && newValue !== '') return newValue;
+      if (newValue && newValue !== 'Visitor' && newValue !== 'Unknown' && newValue !== 0 && newValue !== '') {
+        // Simple sanitization for names
+        if (field === 'name' && typeof newValue === 'string') {
+          return newValue.trim().replace(/^['"]|['"]$/g, '');
+        }
+        return newValue;
+      }
       return oldValue;
     };
 
@@ -182,26 +201,25 @@ RULES:
     if (updateData.demoTime && (updateData.name !== 'Visitor' && (updateData.budget > 0 || updateData.teamSize > 0))) nextStage = 'Booked';
     updateData.stage = nextStage;
 
-    // 6. Persistence (Leads & Conversations)
+    // 6. Persistence
     if (conversationId) {
       try {
         let finalLeadId = convData?.leadId;
-        if (finalLeadId) {
-          await adminDb.collection('leads').doc(finalLeadId).update(updateData);
-        } else {
-          const leadRef = await adminDb.collection('leads').add({
-            ...updateData,
-            createdAt: Date.now(),
-            conversationId
-          });
+        const leadRef = finalLeadId ? adminDb.collection('leads').doc(finalLeadId) : adminDb.collection('leads').doc();
+        
+        if (!finalLeadId) {
           finalLeadId = leadRef.id;
           await adminDb.collection('conversations').doc(conversationId).update({ leadId: finalLeadId });
+          await leadRef.set({ ...updateData, createdAt: Date.now(), conversationId });
+        } else {
+          await leadRef.update(updateData);
         }
 
+        const finalReply = reply || getSafetyQuestion(updateData);
         await adminDb.collection('conversations').doc(conversationId).update({
           messages: admin.firestore.FieldValue.arrayUnion({
             role: 'assistant',
-            content: reply || getSafetyQuestion(updateData),
+            content: finalReply,
             timestamp: Date.now()
           }),
           updatedAt: Date.now()
@@ -217,7 +235,6 @@ RULES:
 
   } catch (fatal: any) {
     console.error("FATAL EXCEPTION in POST /api/chatTurn:", fatal);
-    // Provide a slightly different debug message internally, but same for user
     return NextResponse.json({ 
       reply: "I'm here to help. Could you tell me a bit more about what you're looking for?",
       error: fatal?.message || "Internal server error"
