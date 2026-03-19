@@ -4,8 +4,6 @@ import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import * as admin from 'firebase-admin';
 import { LeadStage, Message, PricingRule } from '@/types/index';
 import fallbackPricing from '@/pricing_config.json';
-
-// Helper: Strip quotes from env vars
 function stripQuotes(str: string | undefined): string {
   if (!str) return '';
   let s = str.trim();
@@ -20,12 +18,10 @@ function serverExtract(text: string) {
   const t = text.trim();
   const lowerT = t.toLowerCase();
   
-  // 1. Sentence-based Name extraction
   const nameMatch = t.match(/(?:my name is|i'm|i am|this is|call me)\s+([A-Z]?[a-zA-Z]+)/i);
   if (nameMatch) {
     data.name = nameMatch[1];
-  } else if (t.split(/\s+/).length === 1 && t.length > 2) {
-    // 2. Single-word name fallback (if message is just one word like "Arav")
+  } else if (t.split(/\s+/).length === 1 && t.length > 2 && /^[A-Z]/.test(t)) {
     data.name = t;
   }
   
@@ -62,17 +58,14 @@ export async function POST(req: Request) {
   try {
     const apiKey = stripQuotes(process.env.GROQ_API_KEY);
     if (!apiKey) {
-      console.error("FATAL: GROQ_API_KEY is missing or empty.");
+      console.error("[FATAL] API Key missing");
       return NextResponse.json({ reply: "AI API key missing." }, { status: 500 });
     }
 
-    const body = await req.json().catch(() => ({}));
-    const { message, conversationId } = body;
-    
-    if (!message) {
-      console.warn("WARN: POST called without message.");
-      return NextResponse.json({ reply: "Message is required." }, { status: 400 });
-    }
+    const { message, conversationId } = await req.json().catch(() => ({}));
+    if (!message) return NextResponse.json({ reply: "Message is required." }, { status: 400 });
+
+    console.log(`[TURN] Message: "${message}" | ConvID: ${conversationId}`);
 
     const groq = new Groq({ apiKey });
 
@@ -84,7 +77,7 @@ export async function POST(req: Request) {
         const pData = pricingSnap.data();
         if (Array.isArray(pData?.rules)) pricingRules = pData.rules;
       }
-    } catch (e) { console.error("Pricing fetch error:", e); }
+    } catch (e) { console.error("[ERROR] Pricing fetch:", e); }
 
     // 2. Persistent State & History Fetch
     let currentLeadData: any = null;
@@ -98,15 +91,23 @@ export async function POST(req: Request) {
           convData = convSnap.data();
           history = (convData.messages || [])
             .filter((m: any) => ['user', 'assistant'].includes(m.role))
-            .slice(-6)
+            .slice(-10) // More history for better context
             .map((m: any) => ({ role: m.role, content: m.content }));
           
           if (convData.leadId) {
+            console.log(`[DEBUG] Found LeadID: ${convData.leadId}`);
             const leadSnap = await adminDb.collection('leads').doc(convData.leadId).get();
-            if (leadSnap.exists) currentLeadData = leadSnap.data();
+            if (leadSnap.exists) {
+              currentLeadData = leadSnap.data();
+              console.log(`[DEBUG] Loaded Lead Data: ${JSON.stringify(currentLeadData)}`);
+            }
+          } else {
+            console.log(`[DEBUG] No LeadID found in conversation.`);
           }
+        } else {
+          console.warn(`[WARN] Conversation ${conversationId} not found in Firestore.`);
         }
-      } catch (dbErr) { console.error("Firestore history fetch error:", dbErr); }
+      } catch (dbErr) { console.error("[ERROR] History fetch:", dbErr); }
     }
 
     const leadState = {
@@ -120,22 +121,25 @@ export async function POST(req: Request) {
       stage: (currentLeadData?.stage as LeadStage) || 'New'
     };
 
+    console.log(`[BRAIN] Final LeadState: ${JSON.stringify(leadState)}`);
+
     // 3. AI Turn with Full Context
     const matchedPlan = getMatchedPlan(leadState.budget, pricingRules);
     
     const systemPrompt = `
 You are the OrbitLead Sales Assistant.
-CORE MEMORY: ${JSON.stringify(leadState)}
-PLAN: ${matchedPlan || "Unknown"}
+CORE MEMORY (Current Lead Data): ${JSON.stringify(leadState)}
+MATCHED PLAN: ${matchedPlan || "Unknown"}
 
 STAGES: New -> Qualified -> Proposed -> Booked -> Completed
 
 RULES:
-1. NEVER ask for data already in CORE MEMORY.
-2. If name is Visitor, your top priority is getting the user's name.
-3. If budget is known, suggest ${matchedPlan} then move to Proposed.
-4. CONFIRM demo if name + (budget or team) exists and move to Booked.
-5. Return JSON ONLY.
+1. NEVER ask for information already in CORE MEMORY.
+2. If name is Visitor, ask for it naturally.
+3. If budget/requirements are known, suggest ${matchedPlan} and move stage to Proposed.
+4. If demo intent is detected, CONFIRM it and move stage to Booked.
+5. BE CONCISE, SALES-FOCUSED, AND HUMAN.
+6. RETURN JSON ONLY.
 
 JSON SCHEMA:
 {
@@ -155,15 +159,16 @@ JSON SCHEMA:
           { role: 'user', content: message }
         ],
         model: 'llama-3.3-70b-versatile',
-        temperature: 0.2,
+        temperature: 0.0, // Maximum determinism
         response_format: { type: 'json_object' }
       });
       
       const content = completion.choices[0]?.message?.content;
-      if (!content) throw new Error("Empty AI response content");
+      if (!content) throw new Error("Empty AI response");
       aiResult = JSON.parse(content);
+      console.log(`[AI] Response: ${content}`);
     } catch (aiErr) {
-      console.error("AI Generation Error:", aiErr);
+      console.error("[ERROR] AI Gen:", aiErr);
       aiResult = { reply: getSafetyQuestion(leadState), intent: 'info', action: 'ask' };
     }
 
@@ -177,11 +182,8 @@ JSON SCHEMA:
     };
 
     const merge = (field: string, newValue: any, oldValue: any) => {
-      if (newValue && newValue !== 'Visitor' && newValue !== 'Unknown' && newValue !== 0 && newValue !== '') {
-        // Simple sanitization for names
-        if (field === 'name' && typeof newValue === 'string') {
-          return newValue.trim().replace(/^['"]|['"]$/g, '');
-        }
+      if (newValue && newValue !== 'Visitor' && newValue !== 'Unknown' && newValue !== 0 && newValue !== '' && newValue !== null) {
+        if (field === 'name' && typeof newValue === 'string') return newValue.trim().replace(/^['"]|['"]$/g, '');
         return newValue;
       }
       return oldValue;
@@ -205,14 +207,16 @@ JSON SCHEMA:
     if (conversationId) {
       try {
         let finalLeadId = convData?.leadId;
-        const leadRef = finalLeadId ? adminDb.collection('leads').doc(finalLeadId) : adminDb.collection('leads').doc();
+        const leadCollection = adminDb.collection('leads');
         
         if (!finalLeadId) {
+          const leadRef = await leadCollection.add({ ...updateData, createdAt: Date.now(), conversationId });
           finalLeadId = leadRef.id;
           await adminDb.collection('conversations').doc(conversationId).update({ leadId: finalLeadId });
-          await leadRef.set({ ...updateData, createdAt: Date.now(), conversationId });
+          console.log(`[DB] Created new Lead: ${finalLeadId}`);
         } else {
-          await leadRef.update(updateData);
+          await leadCollection.doc(finalLeadId).update(updateData);
+          console.log(`[DB] Updated Lead: ${finalLeadId}`);
         }
 
         const finalReply = reply || getSafetyQuestion(updateData);
@@ -224,20 +228,16 @@ JSON SCHEMA:
           }),
           updatedAt: Date.now()
         });
-      } catch (saveErr) { console.error("Firestore persistence error:", saveErr); }
+      } catch (saveErr) { console.error("[ERROR] Persistence:", saveErr); }
     }
 
-    return NextResponse.json({ 
-      reply: reply || getSafetyQuestion(updateData), 
-      state: updateData, 
-      stage: nextStage 
-    });
+    return NextResponse.json({ reply: reply || getSafetyQuestion(updateData), state: updateData, stage: nextStage });
 
   } catch (fatal: any) {
-    console.error("FATAL EXCEPTION in POST /api/chatTurn:", fatal);
+    console.error("[FATAL] API Crash:", fatal);
     return NextResponse.json({ 
-      reply: "I'm here to help. Could you tell me a bit more about what you're looking for?",
-      error: fatal?.message || "Internal server error"
+      reply: "I'm having a technical glitch. Could you re-share your last detail?",
+      error: fatal?.message
     }, { status: 500 });
   }
 }
