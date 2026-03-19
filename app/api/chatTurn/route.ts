@@ -1,16 +1,16 @@
 import { NextResponse } from 'next/server';
 import { Groq } from 'groq-sdk';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
-import { LeadStage, Message } from '@/types/index';
-import pricingConfig from '@/pricing_config.json';
+import { LeadStage, Message, PricingRule } from '@/types/index';
+import fallbackPricing from '@/pricing_config.json';
 
-// Helper: Server-side Regex Fallback Extraction (The Golden Guard)
+// Helper: Server-side Regex Fallback Extraction
 function serverExtract(text: string) {
   const data: any = {};
   const t = text.toLowerCase();
   
   // Name extraction
-  const nameMatch = text.match(/(?:my name is|i'm|i am)\s+([A-Z][a-z]+)/i);
+  const nameMatch = text.match(/(?:my name is|i'm|i am|this is)\s+([A-Z][a-z]+)/i);
   if (nameMatch) data.name = nameMatch[1];
   
   // Company extraction
@@ -18,10 +18,10 @@ function serverExtract(text: string) {
   if (coMatch) data.company = coMatch[1];
 
   // Team Size extraction
-  const teamMatch = t.match(/(\d+)\s*(?:people|team|members)/);
+  const teamMatch = t.match(/(\d+)\s*(?:people|team|members|employees)/);
   if (teamMatch) data.teamSize = parseInt(teamMatch[1], 10);
 
-  // Budget extraction (Fixed for commas)
+  // Budget extraction
   const budgetMatch = t.match(/(?:budget|₹|\$)\s*(\d+(?:,\d+)*(?:\s*[kK])?)/);
   if (budgetMatch) {
      const val = budgetMatch[1].replace(/,/g, '');
@@ -32,289 +32,164 @@ function serverExtract(text: string) {
   return data;
 }
 
-// Helper for scoring leads
+// Helper to match budget to plan
+function getMatchedPlan(budget: number, pricingRules: PricingRule[]): string {
+  if (!budget || budget <= 0) return "";
+  const match = pricingRules.find(p => budget >= p.min && budget <= p.max);
+  return match ? match.name : "Enterprise";
+}
+
 function calculateScore(budget: number, teamSize: number, timeline: string): number {
   let score = 0;
-  if (budget > 100000) score += 30;
-  if (teamSize > 10) score += 20;
-  
-  const tl = (timeline || '').toLowerCase();
-  if (tl.includes('soon') || tl.includes('asap') || tl.includes('now')) {
-    score += 20;
-  }
+  if (budget > 100000) score += 40;
+  if (teamSize > 10) score += 30;
+  if (timeline.toLowerCase().includes('asap') || timeline.toLowerCase().includes('now')) score += 30;
   return Math.min(score, 100);
 }
 
 export async function POST(req: Request) {
-  const start = Date.now();
-  const trace = (step: string) => console.log(`[TRACE] ${step} at +${Date.now() - start}ms`);
-
   try {
-    trace("Request Received");
-
-    // 1. Validate environment variables
     if (!process.env.GROQ_API_KEY) {
-      console.error("[API] CRITICAL: GROQ_API_KEY is missing");
-      return Response.json({ 
-        reply: "Server configuration error: AI API key is missing." 
-      }, { status: 500 });
+      return Response.json({ reply: "AI API key missing." }, { status: 500 });
     }
 
-    // 2. Validate Request Body
-    let message: string, conversationId: string, userId: string;
-    try {
-      const body = await req.json();
-      message = body.message;
-      conversationId = body.conversationId;
-      userId = body.userId;
-      trace("Body Parsed");
-    } catch (e) {
-      console.error("[API] Error parsing request body");
-      return Response.json({ reply: "Invalid request format." }, { status: 400 });
-    }
+    const { message, conversationId, userId } = await req.json();
+    if (!message) return Response.json({ reply: "Message is required." }, { status: 400 });
 
-    if (!message) {
-      return Response.json({ reply: "Message is required." }, { status: 400 });
-    }
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY.trim() });
 
-    // 3. Optional: Authentication Check
-    const authHeader = req.headers.get('Authorization');
-    if (authHeader?.startsWith('Bearer ')) {
-      trace("Auth Verification Started");
-      const idToken = authHeader.split('Bearer ')[1];
-      try {
-        await adminAuth.verifyIdToken(idToken);
-        trace("Auth Verified");
-      } catch (authError) {
-        console.error("[API] Auth verification failed");
-        return Response.json({ reply: "Session expired, please login again." }, { status: 401 });
-      }
-    }
-
-    // 4. Fetch Conversation History & Lead State
-    let history: Message[] = [];
-    let convData: any = null;
-    let currentLeadData: any = null;
-    try {
-      if (conversationId) {
-        trace("Admin Firestore History Fetch Started");
-        const convSnap = await adminDb.collection('conversations').doc(conversationId).get();
-        if (convSnap.exists) {
-          convData = convSnap.data();
-          const rawHistory = convData.messages || [];
-          
-          const leadId = convData.leadId;
-          if (leadId) {
-            const leadSnap = await adminDb.collection('leads').doc(leadId).get();
-            if (leadSnap.exists) {
-              currentLeadData = leadSnap.data();
-            }
-          }
-
-          // === HISTORY PRUNING (IRONCLAD GUARD) ===
-          history = rawHistory.filter((m: any) => {
-            if (m.role === 'assistant' && currentLeadData) {
-              const content = m.content.toLowerCase();
-              if (currentLeadData.budget > 0 && (content.includes('budget') || content.includes('monthly') || content.includes('₹'))) return false;
-              if (currentLeadData.teamSize > 0 && (content.includes('team') || content.includes('members'))) return false;
-              if (currentLeadData.timeline && (content.includes('timeline') || content.includes('when') || content.includes('weeks'))) return false;
-              if (currentLeadData.name && currentLeadData.name !== 'Visitor' && (content.includes('your name') || content.includes('who are you'))) return false;
-            }
-            return true;
-          }).slice(-6); 
-        }
-        trace("Admin Firestore Fetch Completed");
-      }
-    } catch (historyError) {
-      console.error("[API] Error fetching history/lead:", historyError);
-    }
-
-    // TERMINATION RULE
-    if (currentLeadData?.stage === 'completed') {
-      return Response.json({ 
-        reply: `Thanks for your interest, ${currentLeadData.name}! Our team will be in touch soon.`,
-        action: "completed"
-      });
-    }
-
-    // 5. Initialize AI Context
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY?.trim() });
-    
-    // Use Admin SDK for Pricing too
-    let activePricing = { Starter: 50000, Growth: 100000, Enterprise: 200000 };
+    // 1. Fetch Pricing Config (Dynamic)
+    let pricingRules: PricingRule[] = fallbackPricing as PricingRule[];
     try {
       const pricingSnap = await adminDb.collection('settings').doc('pricing').get();
       if (pricingSnap.exists) {
-        activePricing = pricingSnap.data() as any;
-        trace("Admin Pricing Fetched");
+        const data = pricingSnap.data();
+        if (Array.isArray(data?.rules)) {
+          pricingRules = data.rules;
+        } else if (data) {
+          // Handle old format if necessary, but prefer new list format
+          const rules: PricingRule[] = [];
+          if (data.Starter) rules.push({ name: 'Starter', min: 0, max: data.Starter });
+          if (data.Growth) rules.push({ name: 'Growth', min: data.Starter || 0, max: data.Growth });
+          if (data.Enterprise) rules.push({ name: 'Enterprise', min: data.Growth || 0, max: 1000000000 });
+          if (rules.length > 0) pricingRules = rules;
+        }
       }
-    } catch (pe) {
-      console.error("[API] Error fetching admin pricing:", pe);
+    } catch (e) { console.error("Pricing fetch error:", e); }
+
+    // 2. Fetch Lead State
+    let currentLeadData: any = null;
+    let convData: any = null;
+    if (conversationId) {
+      const convSnap = await adminDb.collection('conversations').doc(conversationId).get();
+      if (convSnap.exists) {
+        convData = convSnap.data();
+        if (convData.leadId) {
+          const leadSnap = await adminDb.collection('leads').doc(convData.leadId).get();
+          if (leadSnap.exists) currentLeadData = leadSnap.data();
+        }
+      }
     }
 
-    const sp = activePricing.Starter || 50000;
-    const gp = activePricing.Growth || 100000;
-    const ep = activePricing.Enterprise || 200000;
+    // 3. Extraction & Decision Logic
+    const leadState = {
+      name: currentLeadData?.name || 'Visitor',
+      company: currentLeadData?.company || 'Unknown',
+      teamSize: currentLeadData?.teamSize || 0,
+      budget: currentLeadData?.budget || 0,
+      timeline: currentLeadData?.timeline || '',
+      demoTime: currentLeadData?.demoTime || '',
+      intent: currentLeadData?.intent || 'product_inquiry'
+    };
 
-    // === MILESTONE INJECTION (IRONCLAD GUARD) ===
-    let nextMilestone = "COLLECT_INFO";
-    const missingFields = [];
-    if (!currentLeadData?.budget || currentLeadData.budget === 0) missingFields.push('BUDGET');
-    if (!currentLeadData?.timeline || currentLeadData.timeline === '') missingFields.push('TIMELINE');
-    if (!currentLeadData?.teamSize || currentLeadData.teamSize === 0) missingFields.push('TEAM_SIZE');
-    if (!currentLeadData?.name || currentLeadData.name === 'Visitor') missingFields.push('NAME');
+    const matchedPlan = getMatchedPlan(leadState.budget, pricingRules);
 
-    if (missingFields.length === 0) nextMilestone = "PROPOSE_PLAN_AND_BOOK (All info collected)";
-    else if (currentLeadData?.budget && currentLeadData?.teamSize) nextMilestone = "PROPOSE_SPECIFIC_PLAN";
-    else nextMilestone = `COLLECT_${missingFields[0]}`;
-
-    const knownList = currentLeadData ? Object.entries(currentLeadData)
-      .filter(([k, v]) => v && v !== 'null' && v !== 'Visitor' && v !== 'Unknown' && v !== 0)
-      .map(([k]) => k.toUpperCase())
-      .join(', ') : "None";
-
-    const leadSummary = currentLeadData ? 
-      `[LEAD MEMORY]
-      - Name: ${currentLeadData.name || 'Visitor'}
-      - Company: ${currentLeadData.company || 'Unknown'}
-      - Team Size: ${currentLeadData.teamSize || 'null'}
-      - Monthly Budget: ₹${currentLeadData.budget || 'null'}
-      - Timeline: ${currentLeadData.timeline || 'null'}
-      - Stage: ${currentLeadData.stage || 'collecting'}` : 
-      "No prior lead data.";
-
-    // AGGRESSIVE SYSTEM PROMPT
     const systemPrompt = `
-You are the OrbitLead AI Sales PRO. You are deterministic and NEVER repeat questions.
-### MISSION OBJECTIVE ###
-Current Milestone: ${nextMilestone}
-KNOWN FIELDS (FORBIDDEN TO ASK): ${knownList}
+You are the OrbitLead Sales Executive. Your goal is to qualify leads and book demos.
+Current Lead State: ${JSON.stringify(leadState)}
+Matched Plan: ${matchedPlan || "Unknown (Need budget)"}
 
-### CRITICAL RULES ###
-1. FORBIDDEN QUESTIONS: DO NOT ask for ${knownList}. 
-2. CONTEXT OVER HISTORY: AI context is the [LEAD MEMORY]. If a field is there, it is known.
-3. CONCISE: Be warm but very brief.
+CRITICAL RULES:
+1. NEVER ask for information already present in "Current Lead State".
+2. If "budget" is known, IMMEDIATELY suggest the "${matchedPlan}" plan if you haven't already.
+3. If "demoTime" is provided AND (budget > 0 OR teamSize > 0), confirm the booking instantly.
+4. Keep responses SHORT, human-like, and sales-focused.
+5. If all info is collected, move to booking a demo.
+6. Return ONLY a JSON object.
 
-Return ONLY JSON:
+Output Format:
 {
-  "reply": "...",
-  "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "timeline": "..." },
+  "reply": "Sales-focused response here",
+  "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "timeline": "...", "demoTime": "..." },
   "intent": "demo" | "pricing" | "product_inquiry",
-  "action": "ask" | "suggest" | "booked"
+  "action": "ask" | "suggest" | "booked" | "close"
 }
 `;
 
-    trace("AI Call Started");
-    let aiResponseContent = "{}";
-    try {
-      const completion = await groq.chat.completions.create({
-        messages: [
-          { role: 'system' as any, content: systemPrompt },
-          ...history.map((m: any) => ({
-            role: (m.role === 'assistant' ? 'assistant' : 'user') as any,
-            content: m.content || ""
-          })),
-          { role: 'system' as any, content: `[LEAD MEMORY] ${leadSummary}` },
-          { role: 'user' as any, content: message }
-        ],
-        model: 'llama-3.3-70b-versatile',
-        temperature: 0.1,
-        response_format: { type: 'json_object' }
-      });
-      aiResponseContent = completion.choices[0]?.message?.content || "{}";
-    } catch (aiError) {
-      console.error("[API] AI call failed:", aiError);
-      return Response.json({ reply: "I'm processing your request. Should we schedule a demo?" });
-    }
+    const completion = await groq.chat.completions.create({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: message }
+      ],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.1,
+      response_format: { type: 'json_object' }
+    });
 
-    // 6. Parse & Nuclear Processing
-    let parsedAI;
-    try {
-      parsedAI = JSON.parse(aiResponseContent);
-    } catch (e) {
-      parsedAI = { extracted_data: {} };
-    }
+    const aiResult = JSON.parse(completion.choices[0]?.message?.content || "{}");
+    const { reply, extracted_data, intent, action } = aiResult;
 
-    const { reply, extracted_data, action, intent } = parsedAI;
+    // Merge logic
+    const fallback = serverExtract(message);
+    const finalExtracted = { ...fallback, ...extracted_data };
+
+    const updateData: any = {
+      updatedAt: Date.now(),
+      intent: intent || leadState.intent
+    };
+
+    if (finalExtracted.name && leadState.name === 'Visitor') updateData.name = finalExtracted.name;
+    if (finalExtracted.company && leadState.company === 'Unknown') updateData.company = finalExtracted.company;
+    if (finalExtracted.teamSize && !leadState.teamSize) updateData.teamSize = finalExtracted.teamSize;
+    if (finalExtracted.budget && !leadState.budget) updateData.budget = finalExtracted.budget;
+    if (finalExtracted.timeline && !leadState.timeline) updateData.timeline = finalExtracted.timeline;
+    if (finalExtracted.demoTime && !leadState.demoTime) updateData.demoTime = finalExtracted.demoTime;
+
+    // Scoring & Stage
+    const b = updateData.budget || leadState.budget;
+    const t = updateData.teamSize || leadState.teamSize;
+    const tl = updateData.timeline || leadState.timeline;
+    const dt = updateData.demoTime || leadState.demoTime;
+
+    updateData.score = calculateScore(b, t, tl);
     
-    // NUCLEAR FIX 1: Server-side fallback extraction
-    const fallbackData = serverExtract(message);
-    const finalExtracted = { ...fallbackData, ...extracted_data };
+    let stage: LeadStage = currentLeadData?.stage || 'collecting';
+    if (b > 0 && t > 0) stage = 'qualified';
+    if (b > 0 && matchedPlan) stage = 'proposed';
+    if (dt && (b > 0 || t > 0)) stage = 'booked';
+    if (action === 'close') stage = 'completed';
+    updateData.stage = stage;
 
-    // 7. Admin Firestore Processing (By-pass rules)
+    // Save to Firestore
     if (conversationId) {
-      trace("Admin Lead Update Started");
-      try {
-        const nameVal = (currentLeadData?.name && currentLeadData.name !== 'Visitor') ? currentLeadData.name : (finalExtracted.name || 'Visitor');
-        const companyVal = (currentLeadData?.company && currentLeadData.company !== 'Unknown') ? currentLeadData.company : (finalExtracted.company || 'Unknown');
-        
-        // NUCLEAR FIX 2: Fixed parseNum with comma/multiplier support
-        const parseNum = (val: any) => {
-          if (typeof val === 'number') return val;
-          const clean = String(val || "").replace(/,/g, "");
-          const matches = clean.match(/\d+/g);
-          if (matches && matches.length > 0) {
-            let num = Number(matches[0]);
-            if (clean.toLowerCase().includes('k') && num < 1000) num *= 1000;
-            return num;
-          }
-          return 0;
-        };
-
-        const budgetVal = (currentLeadData?.budget && currentLeadData.budget > 0) ? currentLeadData.budget : parseNum(finalExtracted.budget);
-        const teamVal = (currentLeadData?.teamSize && currentLeadData.teamSize > 0) ? currentLeadData.teamSize : parseNum(finalExtracted.teamSize);
-        const timelineVal = currentLeadData?.timeline || finalExtracted.timeline || '';
-        
-        // Final State Machine
-        let nextStage: LeadStage = currentLeadData?.stage || 'collecting';
-        const keyFieldsKnown = [budgetVal > 0, teamVal > 0, timelineVal !== ''].filter(Boolean).length;
-        if (nextStage === 'collecting' && keyFieldsKnown >= 2) nextStage = 'qualified';
-        if (budgetVal > 0 && teamVal > 0) nextStage = 'proposed';
-        if (action === 'booked' || intent === 'demo') nextStage = 'booked';
-
-        const leadData = {
-          name: nameVal,
-          company: companyVal,
-          teamSize: teamVal,
-          budget: budgetVal,
-          timeline: timelineVal,
-          intent: intent || currentLeadData?.intent || 'product_inquiry',
-          score: calculateScore(budgetVal, teamVal, timelineVal),
-          stage: nextStage,
-          updatedAt: Date.now()
-        };
-
-        const existingLeadId = convData?.leadId;
-        let finalLeadId = existingLeadId;
-        
-        if (existingLeadId) {
-          await adminDb.collection('leads').doc(existingLeadId).update(leadData);
-        } else {
-          const leadRef = await adminDb.collection('leads').add({
-            ...leadData,
-            createdAt: Date.now(),
-            conversationId
-          });
-          finalLeadId = leadRef.id;
-          await adminDb.collection('conversations').doc(conversationId).update({ leadId: finalLeadId });
-        }
-        trace("Admin Lead Update Success");
-      } catch (err) {
-        console.error("[API] Admin SDK Error:", err);
+      if (convData?.leadId) {
+        await adminDb.collection('leads').doc(convData.leadId).update(updateData);
+      } else {
+        const leadRef = await adminDb.collection('leads').add({
+          ...leadState,
+          ...updateData,
+          createdAt: Date.now(),
+          conversationId
+        });
+        await adminDb.collection('conversations').doc(conversationId).update({ leadId: leadRef.id });
       }
     }
 
-    return Response.json({ 
-      reply: reply || "Thanks for the details! Shall we book a demo?", 
-      action: action 
-    });
+    return Response.json({ reply, action });
 
-  } catch (fatal: any) {
-    console.error("[API] FATAL ERROR CAUGHT:", fatal);
-    if (fatal.stack) console.error("[API] STACK:", fatal.stack);
-    return Response.json({ 
-      reply: "I'm having a bit of trouble connecting to our systems. Could you try sending that again in a moment?" 
-    }, { status: 500 });
+  } catch (error: any) {
+    console.error("Chat API Error:", error);
+    return Response.json({ reply: "I'm having trouble. Let's talk about your needs." }, { status: 500 });
   }
 }
 

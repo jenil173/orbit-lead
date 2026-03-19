@@ -32,6 +32,12 @@ export interface Conversation {
   leadId?: string;
 }
 
+export interface PricingRule {
+  name: string;
+  min: number;
+  max: number;
+}
+
 export interface LeadExtraction {
   name?: string;
   company?: string;
@@ -39,5 +45,5 @@ export interface LeadExtraction {
   budget?: string | number;
   timeline?: string;
   demoTime?: string;
-  intent?: string;
+  intent?: 'demo' | 'pricing' | 'product_inquiry' | 'other';
 }
