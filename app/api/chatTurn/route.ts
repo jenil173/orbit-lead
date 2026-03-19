@@ -4,24 +4,20 @@ import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { LeadStage, Message, PricingRule } from '@/types/index';
 import fallbackPricing from '@/pricing_config.json';
 
-// Helper: Server-side Regex Fallback Extraction
+// Helper: Server-side Regex Fallback Extraction (The Safety Guard)
 function serverExtract(text: string) {
   const data: any = {};
   const t = text.toLowerCase();
   
-  // Name extraction
   const nameMatch = text.match(/(?:my name is|i'm|i am|this is)\s+([A-Z][a-z]+)/i);
   if (nameMatch) data.name = nameMatch[1];
   
-  // Company extraction
   const coMatch = text.match(/(?:from|at|with)\s+([A-Z][a-zA-Z0-9]+)/);
   if (coMatch) data.company = coMatch[1];
 
-  // Team Size extraction
   const teamMatch = t.match(/(\d+)\s*(?:people|team|members|employees)/);
   if (teamMatch) data.teamSize = parseInt(teamMatch[1], 10);
 
-  // Budget extraction
   const budgetMatch = t.match(/(?:budget|₹|\$)\s*(\d+(?:,\d+)*(?:\s*[kK])?)/);
   if (budgetMatch) {
      const val = budgetMatch[1].replace(/,/g, '');
@@ -32,19 +28,18 @@ function serverExtract(text: string) {
   return data;
 }
 
-// Helper to match budget to plan
 function getMatchedPlan(budget: number, pricingRules: PricingRule[]): string {
   if (!budget || budget <= 0) return "";
   const match = pricingRules.find(p => budget >= p.min && budget <= p.max);
   return match ? match.name : "Enterprise";
 }
 
-function calculateScore(budget: number, teamSize: number, timeline: string): number {
-  let score = 0;
-  if (budget > 100000) score += 40;
-  if (teamSize > 10) score += 30;
-  if (timeline.toLowerCase().includes('asap') || timeline.toLowerCase().includes('now')) score += 30;
-  return Math.min(score, 100);
+// Safety Question Logic: When AI fails or loops, ask for what's missing
+function getSafetyQuestion(state: any): string {
+  if (!state.name || state.name === 'Visitor') return "Before we dive in, could you tell me your name?";
+  if (!state.budget || state.budget === 0) return `Nice to meet you, ${state.name}! Could you share your monthly budget for lead generation?`;
+  if (!state.teamSize || state.teamSize === 0) return "Got it. How large is your sales team at the moment?";
+  return "Would you like to schedule a quick demo to see how we can help you scale?";
 }
 
 export async function POST(req: Request) {
@@ -58,26 +53,17 @@ export async function POST(req: Request) {
 
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY.trim() });
 
-    // 1. Fetch Pricing Config (Dynamic)
+    // 1. Dynamic Pricing
     let pricingRules: PricingRule[] = fallbackPricing as PricingRule[];
     try {
       const pricingSnap = await adminDb.collection('settings').doc('pricing').get();
       if (pricingSnap.exists) {
         const data = pricingSnap.data();
-        if (Array.isArray(data?.rules)) {
-          pricingRules = data.rules;
-        } else if (data) {
-          // Handle old format if necessary, but prefer new list format
-          const rules: PricingRule[] = [];
-          if (data.Starter) rules.push({ name: 'Starter', min: 0, max: data.Starter });
-          if (data.Growth) rules.push({ name: 'Growth', min: data.Starter || 0, max: data.Growth });
-          if (data.Enterprise) rules.push({ name: 'Enterprise', min: data.Growth || 0, max: 1000000000 });
-          if (rules.length > 0) pricingRules = rules;
-        }
+        if (Array.isArray(data?.rules)) pricingRules = data.rules;
       }
     } catch (e) { console.error("Pricing fetch error:", e); }
 
-    // 2. Fetch Lead State
+    // 2. Persistent State Fetch
     let currentLeadData: any = null;
     let convData: any = null;
     if (conversationId) {
@@ -91,92 +77,94 @@ export async function POST(req: Request) {
       }
     }
 
-    // 3. Extraction & Decision Logic
     const leadState = {
       name: currentLeadData?.name || 'Visitor',
       company: currentLeadData?.company || 'Unknown',
       teamSize: currentLeadData?.teamSize || 0,
       budget: currentLeadData?.budget || 0,
-      timeline: currentLeadData?.timeline || '',
+      requirement: currentLeadData?.requirement || '',
       demoTime: currentLeadData?.demoTime || '',
-      intent: currentLeadData?.intent || 'product_inquiry'
+      intent: currentLeadData?.intent || 'info',
+      stage: (currentLeadData?.stage as LeadStage) || 'New'
     };
 
+    // 3. AI Turn
     const matchedPlan = getMatchedPlan(leadState.budget, pricingRules);
-
+    
     const systemPrompt = `
-You are the OrbitLead Sales Executive. Your goal is to qualify leads and book demos.
-Current Lead State: ${JSON.stringify(leadState)}
-Matched Plan: ${matchedPlan || "Unknown (Need budget)"}
+You are the OrbitLead Sales Assistant.
+CORE MEMORY: ${JSON.stringify(leadState)}
+MATCHED PLAN: ${matchedPlan || "Unknown (Need budget)"}
 
-CRITICAL RULES:
-1. NEVER ask for information already present in "Current Lead State".
-2. If "budget" is known, IMMEDIATELY suggest the "${matchedPlan}" plan if you haven't already.
-3. If "demoTime" is provided AND (budget > 0 OR teamSize > 0), confirm the booking instantly.
-4. Keep responses SHORT, human-like, and sales-focused.
-5. If all info is collected, move to booking a demo.
-6. Return ONLY a JSON object.
+GOAL: Qualify the lead and book a demo.
+RULES:
+1. NEVER ask a question if the answer is in CORE MEMORY.
+2. If budget is known, suggest the ${matchedPlan} plan immediately.
+3. If demo intent or time is detected, and we have name + (budget or team), CONFIRM THE DEMO.
+4. Keep responses HUMAN, SHORT, and SALES-DRIVEN.
+5. Return ONLY JSON.
 
-Output Format:
+Output format:
 {
-  "reply": "Sales-focused response here",
-  "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "timeline": "...", "demoTime": "..." },
-  "intent": "demo" | "pricing" | "product_inquiry",
-  "action": "ask" | "suggest" | "booked" | "close"
+  "reply": "...",
+  "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "requirement": "...", "demoTime": "..." },
+  "intent": "info" | "budget" | "demo" | "feature",
+  "action": "suggest" | "ask" | "confirm"
 }
 `;
 
-    const completion = await groq.chat.completions.create({
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: message }
-      ],
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0.1,
-      response_format: { type: 'json_object' }
-    });
+    let aiResult: any;
+    try {
+      const completion = await groq.chat.completions.create({
+        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: message }],
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0.1,
+        response_format: { type: 'json_object' }
+      });
+      aiResult = JSON.parse(completion.choices[0]?.message?.content || "{}");
+    } catch (aiErr) {
+      console.error("AI Error:", aiErr);
+      return Response.json({ 
+        reply: getSafetyQuestion(leadState),
+        state: leadState,
+        stage: leadState.stage
+      });
+    }
 
-    const aiResult = JSON.parse(completion.choices[0]?.message?.content || "{}");
     const { reply, extracted_data, intent, action } = aiResult;
-
-    // Merge logic
     const fallback = serverExtract(message);
-    const finalExtracted = { ...fallback, ...extracted_data };
-
+    
+    // 4. State Merging (TRUST NEW DATA)
     const updateData: any = {
       updatedAt: Date.now(),
       intent: intent || leadState.intent
     };
 
-    if (finalExtracted.name && leadState.name === 'Visitor') updateData.name = finalExtracted.name;
-    if (finalExtracted.company && leadState.company === 'Unknown') updateData.company = finalExtracted.company;
-    if (finalExtracted.teamSize && !leadState.teamSize) updateData.teamSize = finalExtracted.teamSize;
-    if (finalExtracted.budget && !leadState.budget) updateData.budget = finalExtracted.budget;
-    if (finalExtracted.timeline && !leadState.timeline) updateData.timeline = finalExtracted.timeline;
-    if (finalExtracted.demoTime && !leadState.demoTime) updateData.demoTime = finalExtracted.demoTime;
+    // Helper to overwrite if new data is valid
+    const merge = (field: string, newValue: any, oldValue: any) => {
+      if (newValue && newValue !== 'Visitor' && newValue !== 'Unknown' && newValue !== 0 && newValue !== '') return newValue;
+      return oldValue;
+    };
 
-    // Scoring & Stage
-    const b = updateData.budget || leadState.budget;
-    const t = updateData.teamSize || leadState.teamSize;
-    const tl = updateData.timeline || leadState.timeline;
-    const dt = updateData.demoTime || leadState.demoTime;
+    updateData.name = merge('name', extracted_data?.name || fallback.name, leadState.name);
+    updateData.company = merge('company', extracted_data?.company || fallback.company, leadState.company);
+    updateData.teamSize = merge('teamSize', extracted_data?.teamSize || fallback.teamSize, leadState.teamSize);
+    updateData.budget = merge('budget', extracted_data?.budget || fallback.budget, leadState.budget);
+    updateData.requirement = merge('requirement', extracted_data?.requirement, leadState.requirement);
+    updateData.demoTime = merge('demoTime', extracted_data?.demoTime, leadState.demoTime);
 
-    updateData.score = calculateScore(b, t, tl);
-    
-    let stage: LeadStage = currentLeadData?.stage || 'collecting';
-    if (b > 0 && t > 0) stage = 'qualified';
-    if (b > 0 && matchedPlan) stage = 'proposed';
-    if (dt && (b > 0 || t > 0)) stage = 'booked';
-    if (action === 'close') stage = 'completed';
-    updateData.stage = stage;
+    // 5. Stage Management
+    let nextStage: LeadStage = leadState.stage;
+    if (nextStage === 'New' && (updateData.requirement || updateData.budget > 0)) nextStage = 'Qualified';
+    if (updateData.demoTime && (updateData.name !== 'Visitor' && (updateData.budget > 0 || updateData.teamSize > 0))) nextStage = 'Demo Booked';
+    updateData.stage = nextStage;
 
-    // Save to Firestore
+    // 6. Persistence
     if (conversationId) {
       if (convData?.leadId) {
         await adminDb.collection('leads').doc(convData.leadId).update(updateData);
       } else {
         const leadRef = await adminDb.collection('leads').add({
-          ...leadState,
           ...updateData,
           createdAt: Date.now(),
           conversationId
@@ -185,11 +173,15 @@ Output Format:
       }
     }
 
-    return Response.json({ reply, action });
+    return Response.json({ 
+      reply: reply || getSafetyQuestion(updateData), 
+      state: updateData, 
+      stage: nextStage 
+    });
 
-  } catch (error: any) {
-    console.error("Chat API Error:", error);
-    return Response.json({ reply: "I'm having trouble. Let's talk about your needs." }, { status: 500 });
+  } catch (fatal) {
+    console.error("Fatal Error:", fatal);
+    return Response.json({ reply: "I'm here to help. Could you tell me a bit more about what you're looking for?" }, { status: 500 });
   }
 }
 
