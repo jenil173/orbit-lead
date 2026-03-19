@@ -5,6 +5,15 @@ import * as admin from 'firebase-admin';
 import { LeadStage, Message, PricingRule } from '@/types/index';
 import fallbackPricing from '@/pricing_config.json';
 
+// Helper: Strip quotes from env vars
+function stripQuotes(str: string | undefined): string {
+  if (!str) return '';
+  let s = str.trim();
+  if (s.startsWith('"') && s.endsWith('"')) s = s.substring(1, s.length - 1);
+  if (s.startsWith("'") && s.endsWith("'")) s = s.substring(1, s.length - 1);
+  return s.trim();
+}
+
 // Helper: Server-side Regex Fallback Extraction
 function serverExtract(text: string) {
   const data: any = {};
@@ -44,40 +53,54 @@ function getSafetyQuestion(state: any): string {
 
 export async function POST(req: Request) {
   try {
-    if (!process.env.GROQ_API_KEY) {
-      return Response.json({ reply: "AI API key missing." }, { status: 500 });
+    const apiKey = stripQuotes(process.env.GROQ_API_KEY);
+    if (!apiKey) {
+      console.error("FATAL: GROQ_API_KEY is missing or empty.");
+      return NextResponse.json({ reply: "AI API key missing." }, { status: 500 });
     }
 
-    const { message, conversationId, userId } = await req.json();
-    if (!message) return Response.json({ reply: "Message is required." }, { status: 400 });
+    const body = await req.json().catch(() => ({}));
+    const { message, conversationId } = body;
+    
+    if (!message) {
+      console.warn("WARN: POST called without message.");
+      return NextResponse.json({ reply: "Message is required." }, { status: 400 });
+    }
 
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY.trim() });
+    const groq = new Groq({ apiKey });
 
     // 1. Dynamic Pricing
     let pricingRules: PricingRule[] = fallbackPricing as PricingRule[];
     try {
       const pricingSnap = await adminDb.collection('settings').doc('pricing').get();
       if (pricingSnap.exists) {
-        const data = pricingSnap.data();
-        if (Array.isArray(data?.rules)) pricingRules = data.rules;
+        const pData = pricingSnap.data();
+        if (Array.isArray(pData?.rules)) pricingRules = pData.rules;
       }
     } catch (e) { console.error("Pricing fetch error:", e); }
 
     // 2. Persistent State & History Fetch
     let currentLeadData: any = null;
     let convData: any = null;
-    let history: Message[] = [];
+    let history: any[] = [];
 
     if (conversationId) {
-      const convSnap = await adminDb.collection('conversations').doc(conversationId).get();
-      if (convSnap.exists) {
-        convData = convSnap.data();
-        history = (convData.messages || []).slice(-6); // Last 6 messages for context
-        if (convData.leadId) {
-          const leadSnap = await adminDb.collection('leads').doc(convData.leadId).get();
-          if (leadSnap.exists) currentLeadData = leadSnap.data();
+      try {
+        const convSnap = await adminDb.collection('conversations').doc(conversationId).get();
+        if (convSnap.exists) {
+          convData = convSnap.data();
+          // Filter and map history to only valid roles for Groq
+          history = (convData.messages || [])
+            .filter((m: any) => ['user', 'assistant', 'system'].includes(m.role))
+            .slice(-6)
+            .map((m: any) => ({ role: m.role, content: m.content }));
+          
+          if (convData.leadId) {
+            const leadSnap = await adminDb.collection('leads').doc(convData.leadId).get();
+            if (leadSnap.exists) currentLeadData = leadSnap.data();
+          }
         }
-      }
+      } catch (dbErr) { console.error("Firestore history fetch error:", dbErr); }
     }
 
     const leadState = {
@@ -115,20 +138,23 @@ RULES:
       const completion = await groq.chat.completions.create({
         messages: [
           { role: 'system', content: systemPrompt },
-          ...history.map(m => ({ role: m.role as any, content: m.content })),
+          ...(history.length > 0 ? history : []),
           { role: 'user', content: message }
         ],
         model: 'llama-3.3-70b-versatile',
         temperature: 0.1,
         response_format: { type: 'json_object' }
       });
-      aiResult = JSON.parse(completion.choices[0]?.message?.content || "{}");
+      
+      const content = completion.choices[0]?.message?.content;
+      if (!content) throw new Error("Empty AI response content");
+      aiResult = JSON.parse(content);
     } catch (aiErr) {
-      console.error("AI Error:", aiErr);
+      console.error("AI Generation Error:", aiErr);
       aiResult = { reply: getSafetyQuestion(leadState), intent: 'info', action: 'ask' };
     }
 
-    const { reply, extracted_data, intent, action } = aiResult;
+    const { reply, extracted_data, intent } = aiResult;
     const fallback = serverExtract(message);
     
     // 4. State Merging
@@ -149,7 +175,7 @@ RULES:
     updateData.requirement = merge('requirement', extracted_data?.requirement, leadState.requirement);
     updateData.demoTime = merge('demoTime', extracted_data?.demoTime, leadState.demoTime);
 
-    // 5. Stage Management (Unified)
+    // 5. Stage Management
     let nextStage: LeadStage = leadState.stage;
     if (nextStage === 'New' && (updateData.requirement || updateData.budget > 0)) nextStage = 'Qualified';
     if (updateData.budget > 0 && matchedPlan && nextStage === 'Qualified') nextStage = 'Proposed';
@@ -158,40 +184,44 @@ RULES:
 
     // 6. Persistence (Leads & Conversations)
     if (conversationId) {
-      // 6a. Update Lead
-      let finalLeadId = convData?.leadId;
-      if (finalLeadId) {
-        await adminDb.collection('leads').doc(finalLeadId).update(updateData);
-      } else {
-        const leadRef = await adminDb.collection('leads').add({
-          ...updateData,
-          createdAt: Date.now(),
-          conversationId
-        });
-        finalLeadId = leadRef.id;
-        await adminDb.collection('conversations').doc(conversationId).update({ leadId: finalLeadId });
-      }
+      try {
+        let finalLeadId = convData?.leadId;
+        if (finalLeadId) {
+          await adminDb.collection('leads').doc(finalLeadId).update(updateData);
+        } else {
+          const leadRef = await adminDb.collection('leads').add({
+            ...updateData,
+            createdAt: Date.now(),
+            conversationId
+          });
+          finalLeadId = leadRef.id;
+          await adminDb.collection('conversations').doc(conversationId).update({ leadId: finalLeadId });
+        }
 
-      // 6b. Update Conversation History (Assistant Reply)
-      await adminDb.collection('conversations').doc(conversationId).update({
-        messages: admin.firestore.FieldValue.arrayUnion({
-          role: 'assistant',
-          content: reply || getSafetyQuestion(updateData),
-          timestamp: Date.now()
-        }),
-        updatedAt: Date.now()
-      });
+        await adminDb.collection('conversations').doc(conversationId).update({
+          messages: admin.firestore.FieldValue.arrayUnion({
+            role: 'assistant',
+            content: reply || getSafetyQuestion(updateData),
+            timestamp: Date.now()
+          }),
+          updatedAt: Date.now()
+        });
+      } catch (saveErr) { console.error("Firestore persistence error:", saveErr); }
     }
 
-    return Response.json({ 
+    return NextResponse.json({ 
       reply: reply || getSafetyQuestion(updateData), 
       state: updateData, 
       stage: nextStage 
     });
 
-  } catch (fatal) {
-    console.error("Fatal Error:", fatal);
-    return Response.json({ reply: "I'm here to help. Could you tell me a bit more about what you're looking for?" }, { status: 500 });
+  } catch (fatal: any) {
+    console.error("FATAL EXCEPTION in POST /api/chatTurn:", fatal);
+    // Provide a slightly different debug message internally, but same for user
+    return NextResponse.json({ 
+      reply: "I'm here to help. Could you tell me a bit more about what you're looking for?",
+      error: fatal?.message || "Internal server error"
+    }, { status: 500 });
   }
 }
 
