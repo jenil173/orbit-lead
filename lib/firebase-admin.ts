@@ -15,8 +15,9 @@ function formatPEM(key: string): string {
   
   // 1. Clean up potential junk
   let cleaned = key.trim()
-    .replace(/^["']|["']$/g, '') // Remove wrapping quotes
-    .replace(/\\n/g, '\n');     // Convert escaped \n to real newlines
+    .replace(/^["']|["']$/g, '')   // Remove wrapping quotes
+    .replace(/\\\\n/g, '\n')      // Fix double-escaped \\n
+    .replace(/\\n/g, '\n');       // Fix single-escaped \n
   
   // 2. If it's already a valid PEM, return it
   if (cleaned.includes('-----BEGIN PRIVATE KEY-----') && cleaned.includes('\n')) {
