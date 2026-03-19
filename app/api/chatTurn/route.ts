@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import { Groq } from 'groq-sdk';
-import { adminAuth, adminDb } from '@/lib/firebase-admin';
+import { getAdminDb } from '@/lib/firebase-admin';
 import * as admin from 'firebase-admin';
 import { LeadStage, Message, PricingRule } from '@/types/index';
-import fallbackPricing from '@/pricing_config.json';// Helper: Strip quotes from env vars
+import fallbackPricing from '@/pricing_config.json';
+// Helper: Strip quotes from env vars
 function stripQuotes(str: string | undefined): string {
   if (!str) return '';
   let s = str.trim();
@@ -82,6 +83,9 @@ export async function POST(req: Request) {
     console.log(`[TURN] Message: "${message}" | Conv: ${conversationId}`);
 
     const groq = new Groq({ apiKey });
+
+    // Ensure DB is ready
+    const adminDb = getAdminDb();
 
     // 1. Dynamic Pricing
     let pricingRules: PricingRule[] = fallbackPricing as PricingRule[];
@@ -247,6 +251,9 @@ Response: {
 
   } catch (fatal: any) {
     console.error("[FATAL]", fatal);
-    return NextResponse.json({ reply: "I'm having a small glitch. Could you re-share that last part?", error: fatal?._message }, { status: 500 });
+    return NextResponse.json({ 
+      reply: "I'm having a technical glitch. Try sharing that detail again.", 
+      error: fatal?.message || "Internal crash" 
+    }, { status: 500 });
   }
 }

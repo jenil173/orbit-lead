@@ -1,24 +1,48 @@
 import * as admin from 'firebase-admin';
 
+// Strip quotes from env vars
+function cleanEnv(str: string | undefined): string {
+  if (!str) return '';
+  let s = str.trim();
+  if (s.startsWith('"') && s.endsWith('"')) s = s.substring(1, s.length - 1);
+  if (s.startsWith("'") && s.endsWith("'")) s = s.substring(1, s.length - 1);
+  return s.trim();
+}
+
 if (!admin.apps.length) {
   try {
-    let privateKey = process.env.FIREBASE_PRIVATE_KEY || '';
-    // Strip quotes if they exist
-    if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
-      privateKey = privateKey.substring(1, privateKey.length - 1);
+    const projectId = cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID);
+    const clientEmail = cleanEnv(process.env.FIREBASE_CLIENT_EMAIL);
+    const privateKey = cleanEnv(process.env.FIREBASE_PRIVATE_KEY).replace(/\\n/g, '\n');
+
+    if (projectId && clientEmail && privateKey) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId,
+          clientEmail,
+          privateKey,
+        }),
+      });
+      console.log("[FIREBASE] Admin initialized for:", projectId);
+    } else {
+      console.error("[FIREBASE] Missing credentials in .env.local");
     }
-    
-    admin.initializeApp({
-      credential: admin.credential.cert({
-        projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID?.trim(),
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL?.trim(),
-        privateKey: privateKey.trim().replace(/\\n/g, '\n'),
-      }),
-    });
   } catch (error) {
-    console.error('Firebase admin initialization error:', error);
+    console.error('[FIREBASE] Initialization error:', error);
   }
 }
 
-export const adminAuth = admin.auth();
-export const adminDb = admin.firestore();
+// Export a robust getter for admin services
+export const getAdminDb = () => {
+  if (!admin.apps.length) throw new Error("Firebase Admin not initialized - Check .env.local keys");
+  return admin.firestore();
+};
+
+export const getAdminAuth = () => {
+  if (!admin.apps.length) throw new Error("Firebase Admin not initialized - Check .env.local keys");
+  return admin.auth();
+};
+
+// For backward compatibility (use sparingly)
+export const adminDb = admin.apps.length ? admin.firestore() : null as any;
+export const adminAuth = admin.apps.length ? admin.auth() : null as any;
