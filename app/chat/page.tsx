@@ -43,7 +43,7 @@ export default function ChatPage() {
   const handleSend = async () => {
     if (!input.trim() || !user) return;
 
-    const userMsg: Message = { role: "user", content: input.trim() };
+    const userMsg: any = { role: "user", content: input.trim(), timestamp: Date.now() };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsTyping(true);
@@ -56,7 +56,7 @@ export default function ChatPage() {
         const docRef = await addDoc(collection(db, "conversations"), {
           userId: user.uid,
           messages: [
-            { role: "assistant", content: "Hi there! I'm the OrbitLead AI Assistant. How can I help you today?" },
+            { role: "assistant", content: "Hi there! I'm the OrbitLead AI Assistant. How can I help you today?", timestamp: Date.now() },
             userMsg
           ],
           createdAt: Date.now(),

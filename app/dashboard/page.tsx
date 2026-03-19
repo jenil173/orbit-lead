@@ -16,11 +16,11 @@ import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { LeadDetailModal } from "@/components/LeadDetailModal";
 
 const stages: { id: LeadStage; label: string }[] = [
-  { id: "collecting", label: "Collecting Data" },
-  { id: "qualified", label: "Qualified" },
-  { id: "proposed", label: "Plan Proposed" },
-  { id: "booked", label: "Demo Booked" },
-  { id: "completed", label: "Completed" },
+  { id: "New", label: "New Leads" },
+  { id: "Qualified", label: "Qualified" },
+  { id: "Proposed", label: "Proposed" },
+  { id: "Booked", label: "Demo Booked" },
+  { id: "Completed", label: "Closed" },
 ];
 
 function DroppableColumn({ stage, children, count }: { stage: { id: LeadStage; label: string }, children: React.ReactNode, count: number }) {

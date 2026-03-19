@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
 import { Groq } from 'groq-sdk';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
+import * as admin from 'firebase-admin';
 import { LeadStage, Message, PricingRule } from '@/types/index';
 import fallbackPricing from '@/pricing_config.json';
 
-// Helper: Server-side Regex Fallback Extraction (The Safety Guard)
+// Helper: Server-side Regex Fallback Extraction
 function serverExtract(text: string) {
   const data: any = {};
   const t = text.toLowerCase();
@@ -34,7 +35,6 @@ function getMatchedPlan(budget: number, pricingRules: PricingRule[]): string {
   return match ? match.name : "Enterprise";
 }
 
-// Safety Question Logic: When AI fails or loops, ask for what's missing
 function getSafetyQuestion(state: any): string {
   if (!state.name || state.name === 'Visitor') return "Before we dive in, could you tell me your name?";
   if (!state.budget || state.budget === 0) return `Nice to meet you, ${state.name}! Could you share your monthly budget for lead generation?`;
@@ -63,13 +63,16 @@ export async function POST(req: Request) {
       }
     } catch (e) { console.error("Pricing fetch error:", e); }
 
-    // 2. Persistent State Fetch
+    // 2. Persistent State & History Fetch
     let currentLeadData: any = null;
     let convData: any = null;
+    let history: Message[] = [];
+
     if (conversationId) {
       const convSnap = await adminDb.collection('conversations').doc(conversationId).get();
       if (convSnap.exists) {
         convData = convSnap.data();
+        history = (convData.messages || []).slice(-6); // Last 6 messages for context
         if (convData.leadId) {
           const leadSnap = await adminDb.collection('leads').doc(convData.leadId).get();
           if (leadSnap.exists) currentLeadData = leadSnap.data();
@@ -88,7 +91,7 @@ export async function POST(req: Request) {
       stage: (currentLeadData?.stage as LeadStage) || 'New'
     };
 
-    // 3. AI Turn
+    // 3. AI Turn with Full Context
     const matchedPlan = getMatchedPlan(leadState.budget, pricingRules);
     
     const systemPrompt = `
@@ -97,26 +100,24 @@ CORE MEMORY: ${JSON.stringify(leadState)}
 MATCHED PLAN: ${matchedPlan || "Unknown (Need budget)"}
 
 GOAL: Qualify the lead and book a demo.
+STAGES: New -> Qualified -> Proposed -> Booked -> Completed
+
 RULES:
 1. NEVER ask a question if the answer is in CORE MEMORY.
-2. If budget is known, suggest the ${matchedPlan} plan immediately.
-3. If demo intent or time is detected, and we have name + (budget or team), CONFIRM THE DEMO.
+2. If budget is known, suggest the ${matchedPlan} plan immediately and move stage to Proposed.
+3. If demo intent or time is detected, and we have name + (budget or team), CONFIRM THE DEMO and move stage to Booked.
 4. Keep responses HUMAN, SHORT, and SALES-DRIVEN.
 5. Return ONLY JSON.
-
-Output format:
-{
-  "reply": "...",
-  "extracted_data": { "name": "...", "company": "...", "teamSize": number, "budget": number, "requirement": "...", "demoTime": "..." },
-  "intent": "info" | "budget" | "demo" | "feature",
-  "action": "suggest" | "ask" | "confirm"
-}
 `;
 
     let aiResult: any;
     try {
       const completion = await groq.chat.completions.create({
-        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: message }],
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...history.map(m => ({ role: m.role as any, content: m.content })),
+          { role: 'user', content: message }
+        ],
         model: 'llama-3.3-70b-versatile',
         temperature: 0.1,
         response_format: { type: 'json_object' }
@@ -124,23 +125,18 @@ Output format:
       aiResult = JSON.parse(completion.choices[0]?.message?.content || "{}");
     } catch (aiErr) {
       console.error("AI Error:", aiErr);
-      return Response.json({ 
-        reply: getSafetyQuestion(leadState),
-        state: leadState,
-        stage: leadState.stage
-      });
+      aiResult = { reply: getSafetyQuestion(leadState), intent: 'info', action: 'ask' };
     }
 
     const { reply, extracted_data, intent, action } = aiResult;
     const fallback = serverExtract(message);
     
-    // 4. State Merging (TRUST NEW DATA)
+    // 4. State Merging
     const updateData: any = {
       updatedAt: Date.now(),
       intent: intent || leadState.intent
     };
 
-    // Helper to overwrite if new data is valid
     const merge = (field: string, newValue: any, oldValue: any) => {
       if (newValue && newValue !== 'Visitor' && newValue !== 'Unknown' && newValue !== 0 && newValue !== '') return newValue;
       return oldValue;
@@ -153,24 +149,38 @@ Output format:
     updateData.requirement = merge('requirement', extracted_data?.requirement, leadState.requirement);
     updateData.demoTime = merge('demoTime', extracted_data?.demoTime, leadState.demoTime);
 
-    // 5. Stage Management
+    // 5. Stage Management (Unified)
     let nextStage: LeadStage = leadState.stage;
     if (nextStage === 'New' && (updateData.requirement || updateData.budget > 0)) nextStage = 'Qualified';
-    if (updateData.demoTime && (updateData.name !== 'Visitor' && (updateData.budget > 0 || updateData.teamSize > 0))) nextStage = 'Demo Booked';
+    if (updateData.budget > 0 && matchedPlan && nextStage === 'Qualified') nextStage = 'Proposed';
+    if (updateData.demoTime && (updateData.name !== 'Visitor' && (updateData.budget > 0 || updateData.teamSize > 0))) nextStage = 'Booked';
     updateData.stage = nextStage;
 
-    // 6. Persistence
+    // 6. Persistence (Leads & Conversations)
     if (conversationId) {
-      if (convData?.leadId) {
-        await adminDb.collection('leads').doc(convData.leadId).update(updateData);
+      // 6a. Update Lead
+      let finalLeadId = convData?.leadId;
+      if (finalLeadId) {
+        await adminDb.collection('leads').doc(finalLeadId).update(updateData);
       } else {
         const leadRef = await adminDb.collection('leads').add({
           ...updateData,
           createdAt: Date.now(),
           conversationId
         });
-        await adminDb.collection('conversations').doc(conversationId).update({ leadId: leadRef.id });
+        finalLeadId = leadRef.id;
+        await adminDb.collection('conversations').doc(conversationId).update({ leadId: finalLeadId });
       }
+
+      // 6b. Update Conversation History (Assistant Reply)
+      await adminDb.collection('conversations').doc(conversationId).update({
+        messages: admin.firestore.FieldValue.arrayUnion({
+          role: 'assistant',
+          content: reply || getSafetyQuestion(updateData),
+          timestamp: Date.now()
+        }),
+        updatedAt: Date.now()
+      });
     }
 
     return Response.json({ 
