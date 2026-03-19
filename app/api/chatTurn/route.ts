@@ -3,7 +3,7 @@ import { Groq } from 'groq-sdk';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import * as admin from 'firebase-admin';
 import { LeadStage, Message, PricingRule } from '@/types/index';
-import fallbackPricing from '@/pricing_config.json';
+import fallbackPricing from '@/pricing_config.json';// Helper: Strip quotes from env vars
 function stripQuotes(str: string | undefined): string {
   if (!str) return '';
   let s = str.trim();
@@ -12,25 +12,29 @@ function stripQuotes(str: string | undefined): string {
   return s.trim();
 }
 
-// Helper: Server-side Regex Fallback Extraction
-function serverExtract(text: string) {
+// Helper: Enhanced Regex Fallback Extraction
+function serverExtract(text: string, currentState: any) {
   const data: any = {};
   const t = text.trim();
   const lowerT = t.toLowerCase();
   
+  // 1. Name extraction
   const nameMatch = t.match(/(?:my name is|i'm|i am|this is|call me)\s+([A-Z]?[a-zA-Z]+)/i);
   if (nameMatch) {
     data.name = nameMatch[1];
   } else if (t.split(/\s+/).length === 1 && t.length > 2 && /^[A-Z]/.test(t)) {
     data.name = t;
   }
-  
+
+  // 2. Company extraction
   const coMatch = t.match(/(?:from|at|with)\s+([A-Z][a-zA-Z0-9]+)/);
   if (coMatch) data.company = coMatch[1];
 
+  // 3. Team size
   const teamMatch = lowerT.match(/(\d+)\s*(?:people|team|members|employees)/);
   if (teamMatch) data.teamSize = parseInt(teamMatch[1], 10);
 
+  // 4. Budget
   const budgetMatch = lowerT.match(/(?:budget|₹|\$)\s*(\d+(?:,\d+)*(?:\s*[kK])?)/);
   if (budgetMatch) {
      const val = budgetMatch[1].replace(/,/g, '');
@@ -38,6 +42,16 @@ function serverExtract(text: string) {
      if (val.toLowerCase().includes('k') && num < 1000) num *= 1000;
      data.budget = num;
   }
+
+  // 5. "Already told you" detection - if user is frustrated, try to find info in text again
+  if (lowerT.includes("already") || lowerT.includes("told") || lowerT.includes("shared")) {
+     // Re-scan for anything missing
+     if (!currentState.name || currentState.name === 'Visitor') {
+        const anyWord = t.match(/([A-Z][a-z]+)/);
+        if (anyWord) data.name = anyWord[1];
+     }
+  }
+
   return data;
 }
 
@@ -65,7 +79,7 @@ export async function POST(req: Request) {
     const { message, conversationId } = await req.json().catch(() => ({}));
     if (!message) return NextResponse.json({ reply: "Message is required." }, { status: 400 });
 
-    console.log(`[TURN] Message: "${message}" | ConvID: ${conversationId}`);
+    console.log(`[TURN] Message: "${message}" | Conv: ${conversationId}`);
 
     const groq = new Groq({ apiKey });
 
@@ -77,37 +91,27 @@ export async function POST(req: Request) {
         const pData = pricingSnap.data();
         if (Array.isArray(pData?.rules)) pricingRules = pData.rules;
       }
-    } catch (e) { console.error("[ERROR] Pricing fetch:", e); }
+    } catch (e) { console.error("[ERROR] Pricing:", e); }
 
-    // 2. Persistent State & History Fetch
+    // 2. Persistent State & History
     let currentLeadData: any = null;
     let convData: any = null;
     let history: any[] = [];
 
     if (conversationId) {
-      try {
-        const convSnap = await adminDb.collection('conversations').doc(conversationId).get();
-        if (convSnap.exists) {
-          convData = convSnap.data();
-          history = (convData.messages || [])
-            .filter((m: any) => ['user', 'assistant'].includes(m.role))
-            .slice(-10) // More history for better context
-            .map((m: any) => ({ role: m.role, content: m.content }));
-          
-          if (convData.leadId) {
-            console.log(`[DEBUG] Found LeadID: ${convData.leadId}`);
-            const leadSnap = await adminDb.collection('leads').doc(convData.leadId).get();
-            if (leadSnap.exists) {
-              currentLeadData = leadSnap.data();
-              console.log(`[DEBUG] Loaded Lead Data: ${JSON.stringify(currentLeadData)}`);
-            }
-          } else {
-            console.log(`[DEBUG] No LeadID found in conversation.`);
-          }
-        } else {
-          console.warn(`[WARN] Conversation ${conversationId} not found in Firestore.`);
+      const convSnap = await adminDb.collection('conversations').doc(conversationId).get();
+      if (convSnap.exists) {
+        convData = convSnap.data();
+        history = (convData.messages || [])
+          .filter((m: any) => ['user', 'assistant'].includes(m.role))
+          .slice(-10)
+          .map((m: any) => ({ role: m.role, content: m.content }));
+        
+        if (convData.leadId) {
+          const leadSnap = await adminDb.collection('leads').doc(convData.leadId).get();
+          if (leadSnap.exists) currentLeadData = leadSnap.data();
         }
-      } catch (dbErr) { console.error("[ERROR] History fetch:", dbErr); }
+      }
     }
 
     const leadState = {
@@ -121,32 +125,41 @@ export async function POST(req: Request) {
       stage: (currentLeadData?.stage as LeadStage) || 'New'
     };
 
-    console.log(`[BRAIN] Final LeadState: ${JSON.stringify(leadState)}`);
+    console.log(`[STATE] ${JSON.stringify(leadState)}`);
 
-    // 3. AI Turn with Full Context
+    // 3. Ultra-Robust AI Prompting
     const matchedPlan = getMatchedPlan(leadState.budget, pricingRules);
     
     const systemPrompt = `
-You are the OrbitLead Sales Assistant.
-CORE MEMORY (Current Lead Data): ${JSON.stringify(leadState)}
-MATCHED PLAN: ${matchedPlan || "Unknown"}
+You are the OrbitLead Sales Assistant. 
 
-STAGES: New -> Qualified -> Proposed -> Booked -> Completed
+STRICT STATUS (WHAT YOU ALREADY KNOW):
+- Lead Name: ${leadState.name}
+- Company: ${leadState.company}
+- Team Size: ${leadState.teamSize}
+- Budget: ${leadState.budget}
+- Current Plan: ${matchedPlan || "Unknown"}
+- Current Stage: ${leadState.stage}
 
-RULES:
-1. NEVER ask for information already in CORE MEMORY.
-2. If name is Visitor, ask for it naturally.
-3. If budget/requirements are known, suggest ${matchedPlan} and move stage to Proposed.
-4. If demo intent is detected, CONFIRM it and move stage to Booked.
-5. BE CONCISE, SALES-FOCUSED, AND HUMAN.
-6. RETURN JSON ONLY.
+GOAL: Qualify lead and book a demo.
+FLOW: New -> Qualified -> Proposed -> Booked -> Completed
 
-JSON SCHEMA:
-{
-  "reply": "your response",
-  "extracted_data": { "name": string, "company": string, "teamSize": number, "budget": number, "requirement": string, "demoTime": string },
-  "intent": "info"|"budget"|"demo",
-  "action": "ask"|"suggest"|"confirm"
+CRITICAL RULES:
+1. NEVER ASK for information listed above as known.
+2. If Name is "Visitor", get the name.
+3. If Company is "Unknown", get the company.
+4. If Budget is known, suggest ${matchedPlan} and move to Proposed.
+5. If Demo intent is detected, CONFIRM it and move to Booked.
+6. BE HUMAN, CONCISE, AND SALES-DRIVEN.
+7. Return ONLY JSON.
+
+ONE-SHOT EXAMPLE:
+User: "I'm Kunal from SalesOrbit. Budget is 1L."
+Response: {
+  "reply": "Hi Kunal! Nice to have SalesOrbit here. Based on your budget, our Growth plan is perfect. Would you like a demo?",
+  "extracted_data": { "name": "Kunal", "company": "SalesOrbit", "budget": 100000 },
+  "intent": "budget",
+  "action": "suggest"
 }
 `;
 
@@ -159,30 +172,31 @@ JSON SCHEMA:
           { role: 'user', content: message }
         ],
         model: 'llama-3.3-70b-versatile',
-        temperature: 0.0, // Maximum determinism
+        temperature: 0.0,
         response_format: { type: 'json_object' }
       });
       
       const content = completion.choices[0]?.message?.content;
-      if (!content) throw new Error("Empty AI response");
-      aiResult = JSON.parse(content);
-      console.log(`[AI] Response: ${content}`);
+      aiResult = JSON.parse(content || "{}");
+      console.log(`[AI] ${content}`);
     } catch (aiErr) {
-      console.error("[ERROR] AI Gen:", aiErr);
+      console.error("[AI ERROR]", aiErr);
       aiResult = { reply: getSafetyQuestion(leadState), intent: 'info', action: 'ask' };
     }
 
     const { reply, extracted_data, intent } = aiResult;
-    const fallback = serverExtract(message);
+    const fallback = serverExtract(message, leadState);
     
-    // 4. State Merging
+    // 4. Atomic State Merging
     const updateData: any = {
       updatedAt: Date.now(),
       intent: intent || leadState.intent
     };
 
     const merge = (field: string, newValue: any, oldValue: any) => {
-      if (newValue && newValue !== 'Visitor' && newValue !== 'Unknown' && newValue !== 0 && newValue !== '' && newValue !== null) {
+      // Don't let null/empty/Visitor overwrite real data
+      const isNewValid = newValue !== undefined && newValue !== null && newValue !== '' && newValue !== 0 && newValue !== 'Visitor' && newValue !== 'Unknown';
+      if (isNewValid) {
         if (field === 'name' && typeof newValue === 'string') return newValue.trim().replace(/^['"]|['"]$/g, '');
         return newValue;
       }
@@ -196,7 +210,7 @@ JSON SCHEMA:
     updateData.requirement = merge('requirement', extracted_data?.requirement, leadState.requirement);
     updateData.demoTime = merge('demoTime', extracted_data?.demoTime, leadState.demoTime);
 
-    // 5. Stage Management
+    // 5. Stage Transitions
     let nextStage: LeadStage = leadState.stage;
     if (nextStage === 'New' && (updateData.requirement || updateData.budget > 0)) nextStage = 'Qualified';
     if (updateData.budget > 0 && matchedPlan && nextStage === 'Qualified') nextStage = 'Proposed';
@@ -213,10 +227,8 @@ JSON SCHEMA:
           const leadRef = await leadCollection.add({ ...updateData, createdAt: Date.now(), conversationId });
           finalLeadId = leadRef.id;
           await adminDb.collection('conversations').doc(conversationId).update({ leadId: finalLeadId });
-          console.log(`[DB] Created new Lead: ${finalLeadId}`);
         } else {
           await leadCollection.doc(finalLeadId).update(updateData);
-          console.log(`[DB] Updated Lead: ${finalLeadId}`);
         }
 
         const finalReply = reply || getSafetyQuestion(updateData);
@@ -228,17 +240,13 @@ JSON SCHEMA:
           }),
           updatedAt: Date.now()
         });
-      } catch (saveErr) { console.error("[ERROR] Persistence:", saveErr); }
+      } catch (saveErr) { console.error("[DB ERROR]", saveErr); }
     }
 
     return NextResponse.json({ reply: reply || getSafetyQuestion(updateData), state: updateData, stage: nextStage });
 
   } catch (fatal: any) {
-    console.error("[FATAL] API Crash:", fatal);
-    return NextResponse.json({ 
-      reply: "I'm having a technical glitch. Could you re-share your last detail?",
-      error: fatal?.message
-    }, { status: 500 });
+    console.error("[FATAL]", fatal);
+    return NextResponse.json({ reply: "I'm having a small glitch. Could you re-share that last part?", error: fatal?._message }, { status: 500 });
   }
 }
-
