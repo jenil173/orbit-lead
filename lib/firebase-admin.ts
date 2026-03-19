@@ -16,29 +16,35 @@ function formatPEM(key: string): string {
   // 1. Clean up potential junk
   let cleaned = key.trim()
     .replace(/^["']|["']$/g, '')   // Remove wrapping quotes
-    .replace(/\\\\n/g, '\n')      // Fix double-escaped \\n
-    .replace(/\\n/g, '\n');       // Fix single-escaped \n
-  
-  // 2. If it's already a valid PEM, return it
-  if (cleaned.includes('-----BEGIN PRIVATE KEY-----') && cleaned.includes('\n')) {
-    return cleaned;
-  }
+    .replace(/\\n/g, '\n')        // Fix escaped \n
+    .replace(/\\n/g, '\n');       // Double run for safety
 
-  // 3. If it looks like a "flat" key (no newlines), re-construct it
+  // 2. Ensure it has headers
   const header = "-----BEGIN PRIVATE KEY-----";
   const footer = "-----END PRIVATE KEY-----";
   
-  // Strip header/footer to get raw base64
-  let base64 = cleaned
+  if (!cleaned.includes(header)) {
+    cleaned = `${header}\n${cleaned}`;
+  }
+  if (!cleaned.includes(footer)) {
+    cleaned = `${cleaned}\n${footer}`;
+  }
+
+  // 3. Re-chunk the body to be 100% compliant with OpenSSL 3.0
+  let body = cleaned
     .replace(header, '')
     .replace(footer, '')
     .replace(/\s+/g, ''); // Remove all whitespace/newlines from body
   
-  // 4. Chunk into 64-character lines (Industry Standard)
-  const matches = base64.match(/.{1,64}/g);
-  const chunkedBody = matches ? matches.join('\n') : base64;
+  const matches = body.match(/.{1,64}/g);
+  const chunkedBody = matches ? matches.join('\n') : body;
   
-  return `${header}\n${chunkedBody}\n${footer}\n`;
+  const finalKey = `${header}\n${chunkedBody}\n${footer}\n`;
+  
+  // Safe logging for debugging Vercel (only prefix)
+  console.log(`[FIREBASE] Key formatted. Length: ${finalKey.length}. Prefix: ${finalKey.substring(0, 30)}...`);
+  
+  return finalKey;
 }
 
 if (!admin.apps.length) {
