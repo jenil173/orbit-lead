@@ -13,9 +13,10 @@ if (!admin.apps.length) {
   try {
     const projectId = cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID);
     const clientEmail = cleanEnv(process.env.FIREBASE_CLIENT_EMAIL);
-    const privateKey = cleanEnv(process.env.FIREBASE_PRIVATE_KEY).replace(/\\n/g, '\n');
+    const privateKeyRaw = cleanEnv(process.env.FIREBASE_PRIVATE_KEY);
+    const privateKey = privateKeyRaw.replace(/\\n/g, '\n');
 
-    if (projectId && clientEmail && privateKey) {
+    if (projectId && clientEmail && privateKey.includes('BEGIN PRIVATE KEY')) {
       admin.initializeApp({
         credential: admin.credential.cert({
           projectId,
@@ -25,7 +26,11 @@ if (!admin.apps.length) {
       });
       console.log("[FIREBASE] Admin initialized for:", projectId);
     } else {
-      console.error("[FIREBASE] Missing credentials in .env.local");
+      let missing = [];
+      if (!projectId) missing.push("PROJECT_ID");
+      if (!clientEmail) missing.push("CLIENT_EMAIL");
+      if (!privateKey.includes('BEGIN PRIVATE KEY')) missing.push("PRIVATE_KEY_FORMAT");
+      console.error("[FIREBASE] Initialization failed. Missing/Invalid:", missing.join(', '));
     }
   } catch (error) {
     console.error('[FIREBASE] Initialization error:', error);

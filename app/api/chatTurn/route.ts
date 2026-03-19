@@ -251,9 +251,10 @@ Response: {
 
   } catch (fatal: any) {
     console.error("[FATAL]", fatal);
+    const errDetail = fatal?.message || "Internal crash";
     return NextResponse.json({ 
-      reply: "I'm having a technical glitch. Try sharing that detail again.", 
-      error: fatal?.message || "Internal crash" 
+      reply: `I'm having a technical glitch. (Detail: ${errDetail}) Try sharing that detail again.`, 
+      error: errDetail 
     }, { status: 500 });
   }
 }

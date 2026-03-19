@@ -96,7 +96,10 @@ export default function ChatPage() {
 
     } catch (error: any) {
       console.error("Chat error:", error);
-      const errorMessage = error.message || "Sorry, I'm having trouble connecting right now.";
+      const errorMessage = error.message.includes("technical glitch") 
+        ? `${error.message} (Detail: ${error.message.split('Detail: ')[1] || 'Check logs'})`
+        : error.message || "Sorry, I'm having trouble connecting right now.";
+      
       setMessages((prev) => [...prev, { role: "assistant", content: errorMessage }]);
     } finally {
       setIsTyping(false);
