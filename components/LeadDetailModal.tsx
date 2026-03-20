@@ -26,27 +26,34 @@ export function LeadDetailModal({
 
   const scrollToBottom = () => {
     if (scrollContainerRef.current) {
-      const container = scrollContainerRef.current;
-      container.scrollTop = container.scrollHeight;
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
     }
   }
 
   useEffect(() => {
-    if (isOpen && !loadingHistory && messages.length > 0) {
-      // Multiple attempts to ensure it works after animations and rendering
-      scrollToBottom(); // Immediate
-      
-      const t1 = setTimeout(scrollToBottom, 100);
-      const t2 = setTimeout(scrollToBottom, 300);
-      const t3 = setTimeout(scrollToBottom, 600);
-      
-      return () => {
-        clearTimeout(t1);
-        clearTimeout(t2);
-        clearTimeout(t3);
-      };
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const observer = new ResizeObserver(() => {
+      if (isOpen && !loadingHistory) {
+        scrollToBottom();
+      }
+    });
+
+    observer.observe(container);
+    // Also scroll children changes
+    for (const child of Array.from(container.children)) {
+      observer.observe(child);
     }
-  }, [messages.length, isOpen, loadingHistory])
+
+    return () => observer.disconnect();
+  }, [isOpen, loadingHistory, messages.length]);
+
+  useEffect(() => {
+    if (isOpen && !loadingHistory) {
+      scrollToBottom();
+    }
+  }, [isOpen, loadingHistory]);
   
   // editable fields
   const [formData, setFormData] = useState<Partial<Lead>>({})
