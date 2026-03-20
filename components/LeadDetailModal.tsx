@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -22,6 +22,17 @@ export function LeadDetailModal({
   const [messages, setMessages] = useState<Message[]>([])
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [saving, setSaving] = useState(false)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }
+
+  useEffect(() => {
+    if (isOpen) {
+      scrollToBottom()
+    }
+  }, [messages, isOpen])
   
   // editable fields
   const [formData, setFormData] = useState<Partial<Lead>>({})
@@ -145,18 +156,21 @@ export function LeadDetailModal({
                   <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
                 </div>
               ) : messages.length > 0 ? (
-                messages.filter(m => m.role !== 'system').map((msg, idx) => (
-                  <div key={idx} className={`p-3 rounded-lg text-sm ${
-                    msg.role === 'assistant' 
-                      ? 'bg-slate-200 text-slate-900 ml-4 rounded-tr-none' 
-                      : 'bg-indigo-100 text-indigo-900 mr-4 rounded-tl-none'
-                  }`}>
-                    <span className="font-semibold text-[10px] uppercase tracking-wide block mb-1 opacity-70">
-                      {msg.role === 'assistant' ? 'AI Sales Rep' : 'Visitor'}
-                    </span>
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
-                  </div>
-                ))
+                <>
+                  {messages.filter(m => m.role !== 'system').map((msg, idx) => (
+                    <div key={idx} className={`p-3 rounded-lg text-sm ${
+                      msg.role === 'assistant' 
+                        ? 'bg-slate-200 text-slate-900 ml-4 rounded-tr-none' 
+                        : 'bg-indigo-100 text-indigo-900 mr-4 rounded-tl-none'
+                    }`}>
+                      <span className="font-semibold text-[10px] uppercase tracking-wide block mb-1 opacity-70">
+                        {msg.role === 'assistant' ? 'AI Sales Rep' : 'Visitor'}
+                      </span>
+                      <p className="whitespace-pre-wrap">{msg.content}</p>
+                    </div>
+                  ))}
+                  <div ref={messagesEndRef} />
+                </>
               ) : (
                 <p className="text-sm text-slate-500 italic text-center mt-10">No conversation history available.</p>
               )}
