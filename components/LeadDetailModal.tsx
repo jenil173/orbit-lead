@@ -25,21 +25,25 @@ export function LeadDetailModal({
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
+    // We use a slightly longer timeout to ensure modal animations are finished
     setTimeout(() => {
       if (scrollContainerRef.current) {
-        scrollContainerRef.current.scrollTo({
-          top: scrollContainerRef.current.scrollHeight,
+        const container = scrollContainerRef.current;
+        container.scrollTop = container.scrollHeight;
+        // Also call smooth scroll as a secondary measure
+        container.scrollTo({
+          top: container.scrollHeight,
           behavior: "smooth"
-        })
+        });
       }
-    }, 100)
+    }, 300)
   }
 
   useEffect(() => {
-    if (isOpen && !loadingHistory) {
+    if (isOpen && !loadingHistory && messages.length > 0) {
       scrollToBottom()
     }
-  }, [messages, isOpen, loadingHistory])
+  }, [messages.length, isOpen, loadingHistory])
   
   // editable fields
   const [formData, setFormData] = useState<Partial<Lead>>({})
@@ -159,7 +163,7 @@ export function LeadDetailModal({
             
             <div 
               ref={scrollContainerRef}
-              className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[60vh] md:max-h-full scroll-smooth"
+              className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[60vh] md:max-h-full"
             >
               {loadingHistory ? (
                 <div className="flex items-center justify-center h-full">
