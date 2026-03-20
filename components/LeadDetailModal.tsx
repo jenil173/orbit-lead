@@ -22,7 +22,9 @@ export function LeadDetailModal({
   const [messages, setMessages] = useState<Message[]>([])
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [hasLoadedInitial, setHasLoadedInitial] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const prevMessagesCount = useRef(0)
 
   const scrollToBottom = () => {
     if (messagesEndRef.current) {
@@ -30,11 +32,31 @@ export function LeadDetailModal({
     }
   }
 
+  // Reset flag when closed
   useEffect(() => {
-    if (isOpen) {
-      scrollToBottom();
+    if (!isOpen) {
+      setHasLoadedInitial(false);
+      prevMessagesCount.current = 0;
     }
-  }, [messages, isOpen, loadingHistory])
+  }, [isOpen]);
+
+  // Handle controlled scrolling
+  useEffect(() => {
+    if (isOpen && !loadingHistory && messages.length > 0) {
+      // First time loading history - record count but DON'T scroll (shows top)
+      if (!hasLoadedInitial) {
+        setHasLoadedInitial(true);
+        prevMessagesCount.current = messages.length;
+        return;
+      }
+      
+      // Scroll ONLY when new messages are added
+      if (messages.length > prevMessagesCount.current) {
+        scrollToBottom();
+        prevMessagesCount.current = messages.length;
+      }
+    }
+  }, [messages, isOpen, loadingHistory, hasLoadedInitial])
   
   // editable fields
   const [formData, setFormData] = useState<Partial<Lead>>({})
@@ -105,8 +127,8 @@ export function LeadDetailModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-5xl max-h-[90vh] flex flex-col p-0 overflow-hidden shadow-2xl border-none">
-        <div className="flex flex-col md:flex-row h-full overflow-hidden">
+      <DialogContent className="max-w-5xl h-[90vh] md:h-[80vh] flex flex-col p-0 overflow-hidden shadow-2xl border-none">
+        <div className="flex flex-col md:flex-row flex-1 overflow-hidden">
           
           {/* Left Side - Edit Form */}
           <div className="flex-1 overflow-y-auto p-6 space-y-4">
