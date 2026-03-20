@@ -25,19 +25,21 @@ export function LeadDetailModal({
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTo({
-        top: scrollContainerRef.current.scrollHeight,
-        behavior: "smooth"
-      })
-    }
+    setTimeout(() => {
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTo({
+          top: scrollContainerRef.current.scrollHeight,
+          behavior: "smooth"
+        })
+      }
+    }, 100)
   }
 
   useEffect(() => {
-    if (isOpen) {
-      setTimeout(scrollToBottom, 100)
+    if (isOpen && !loadingHistory) {
+      scrollToBottom()
     }
-  }, [messages, isOpen])
+  }, [messages, isOpen, loadingHistory])
   
   // editable fields
   const [formData, setFormData] = useState<Partial<Lead>>({})
