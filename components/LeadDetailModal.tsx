@@ -22,38 +22,19 @@ export function LeadDetailModal({
   const [messages, setMessages] = useState<Message[]>([])
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [saving, setSaving] = useState(false)
-  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }
 
   useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    const observer = new ResizeObserver(() => {
-      if (isOpen && !loadingHistory) {
-        scrollToBottom();
-      }
-    });
-
-    observer.observe(container);
-    // Also scroll children changes
-    for (const child of Array.from(container.children)) {
-      observer.observe(child);
-    }
-
-    return () => observer.disconnect();
-  }, [isOpen, loadingHistory, messages.length]);
-
-  useEffect(() => {
-    if (isOpen && !loadingHistory) {
+    if (isOpen) {
       scrollToBottom();
     }
-  }, [isOpen, loadingHistory]);
+  }, [messages, isOpen, loadingHistory])
   
   // editable fields
   const [formData, setFormData] = useState<Partial<Lead>>({})
@@ -91,14 +72,32 @@ export function LeadDetailModal({
 
   const handleSave = async () => {
     if (!lead) return
+    
+    // Safety check - prevent empty or invalid updates
+    if (!formData.name?.trim() || !formData.company?.trim()) {
+      alert("Name and Company are required.");
+      return;
+    }
+
     setSaving(true)
     try {
+      const updatedData = {
+        name: formData.name.trim(),
+        company: formData.company.trim(),
+        budget: Number(formData.budget) || 0,
+        teamSize: Number(formData.teamSize) || 0,
+        timeline: formData.timeline || '',
+      }
+
       const leadRef = doc(db, "leads", lead.id)
-      await updateDoc(leadRef, formData)
-      onUpdate({ ...lead, ...formData } as Lead)
+      await updateDoc(leadRef, updatedData)
+      
+      const updatedLead = { ...lead, ...updatedData } as Lead;
+      onUpdate(updatedLead)
       onClose()
     } catch (error) {
       console.error("Failed to update lead", error)
+      alert("Failed to save changes. Please try again.")
     } finally {
       setSaving(false)
     }
@@ -172,7 +171,6 @@ export function LeadDetailModal({
             </div>
             
             <div 
-              ref={scrollContainerRef}
               className="flex-1 overflow-y-auto p-4 space-y-4"
             >
               {loadingHistory ? (
@@ -193,6 +191,7 @@ export function LeadDetailModal({
                       <p className="whitespace-pre-wrap">{msg.content}</p>
                     </div>
                   ))}
+                  <div ref={messagesEndRef} />
                 </>
               ) : (
                 <p className="text-sm text-slate-500 italic text-center mt-10">No conversation history available.</p>

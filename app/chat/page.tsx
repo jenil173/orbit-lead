@@ -34,7 +34,9 @@ export default function ChatPage() {
   }, [user, loading, router]);
 
   useEffect(() => {
-    scrollToBottom();
+    setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 100);
   }, [messages, isTyping]);
 
   const handleSend = async () => {
