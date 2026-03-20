@@ -22,17 +22,20 @@ export function LeadDetailModal({
   const [messages, setMessages] = useState<Message[]>([])
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [saving, setSaving] = useState(false)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
-    setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-    }, 100)
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTo({
+        top: scrollContainerRef.current.scrollHeight,
+        behavior: "smooth"
+      })
+    }
   }
 
   useEffect(() => {
     if (isOpen) {
-      scrollToBottom()
+      setTimeout(scrollToBottom, 100)
     }
   }, [messages, isOpen])
   
@@ -152,7 +155,10 @@ export function LeadDetailModal({
               <h3 className="font-semibold text-slate-800 text-sm">Conversation History</h3>
             </div>
             
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[60vh] md:max-h-full">
+            <div 
+              ref={scrollContainerRef}
+              className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[60vh] md:max-h-full scroll-smooth"
+            >
               {loadingHistory ? (
                 <div className="flex items-center justify-center h-full">
                   <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
@@ -171,7 +177,6 @@ export function LeadDetailModal({
                       <p className="whitespace-pre-wrap">{msg.content}</p>
                     </div>
                   ))}
-                  <div ref={messagesEndRef} />
                 </>
               ) : (
                 <p className="text-sm text-slate-500 italic text-center mt-10">No conversation history available.</p>

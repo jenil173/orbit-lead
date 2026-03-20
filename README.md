@@ -113,25 +113,14 @@ Follow these steps to run the project locally:
 
 ---
 
-## 🧪 How to Test the Project
+### **Demo Chat Guide (Copy & Paste to Test)**
 
-Use these scenarios to test the AI's intelligence and the dashboard's automation:
-
-### **Test 1 – High-Value Customer (The "Vikram" Test)**
-- **Input:** *"Hi, I'm Vikram from CloudScale. We have 60 people and a budget of ₹4,00,000. We need to start next week."*
-- **Result:** AI suggests **Enterprise Plan**, offers a **Demo Booking**, and creates a card in the **Pipeline Dashboard** with a high score.
-
-### **Test 2 – Small Business (The "Anjali" Test)**
-- **Input:** *"I'm Anjali from a small agency. 8 people, budget is ₹90,000."*
-- **Result:** AI suggests **Growth Plan**. Does not push for a demo as hard as high-value leads.
-
-### **Test 3 – Objection Handling**
-- **Input:** *"These plans are too expensive. Do you have a discount?"*
-- **Result:** AI professionally stays on message, explains value, and sticks to the system-defined pricing rules.
-
-### **Test 4 – Demo Booking Completion**
-- **Input:** *"Yes, I want to book the demo for Monday at 10AM."*
-- **Result:** AI confirms booking. Check the **Dashboard**; the lead card will automatically jump to the **"Demo Booked"** stage.
+| Feature | What to Type | AI Expected Behavior |
+| :--- | :--- | :--- |
+| **Qualification** | "Hi, I'm Rohan from LeadSphere. We have 30 people and need automation." | Extracts Name, Company, Team Size. Moves to **Qualified**. |
+| **Pricing** | "What are your plans? Our budget is ₹1,00,000." | Suggests **Growth Plan** (INR). Moves to **Proposed**. |
+| **Demo Booking** | "I'd like a demo on Friday at 2 PM." | Confirms time. Moves to **Demo Booked**. |
+| **Closing** | "Sounds great, we are ready to proceed with the purchase." | Professional closing. Moves to **Closed**. |
 
 ---
 
