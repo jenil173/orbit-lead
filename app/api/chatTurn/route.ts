@@ -56,10 +56,20 @@ function serverExtract(text: string, currentState: any) {
   return data;
 }
 
-function getMatchedPlan(budget: number, pricingRules: PricingRule[]): string {
+function getMatchedPlan(budget: number, pricingRules: any): string {
   if (!budget || budget <= 0) return "";
-  const match = pricingRules.find(p => budget >= p.min && budget <= p.max);
-  return match ? match.name : "Enterprise";
+  
+  // Handle Array structure (fallback/old)
+  if (Array.isArray(pricingRules)) {
+    const match = pricingRules.find((p: any) => budget >= p.min && budget <= p.max);
+    return match ? match.name : "Enterprise";
+  }
+  
+  // Handle Flat Object structure (new settings)
+  const p = pricingRules;
+  if (budget <= (p.Starter || 50000)) return "Starter";
+  if (budget <= (p.Growth || 100000)) return "Growth";
+  return "Enterprise";
 }
 
 function getSafetyQuestion(state: any): string {
@@ -88,12 +98,13 @@ export async function POST(req: Request) {
     const adminDb = getAdminDb();
 
     // 1. Dynamic Pricing
-    let pricingRules: PricingRule[] = fallbackPricing as PricingRule[];
+    let pricingRules: any = fallbackPricing;
     try {
       const pricingSnap = await adminDb.collection('settings').doc('pricing').get();
       if (pricingSnap.exists) {
         const pData = pricingSnap.data();
-        if (Array.isArray(pData?.rules)) pricingRules = pData.rules;
+        // Use the whole object if it's the new flat structure, or the .rules if it's the old array structure
+        pricingRules = pData?.rules || pData;
       }
     } catch (e) { console.error("[ERROR] Pricing:", e); }
 
