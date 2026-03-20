@@ -134,6 +134,14 @@ export async function POST(req: Request) {
     // 3. Ultra-Robust AI Prompting
     const matchedPlan = getMatchedPlan(leadState.budget, pricingRules);
     
+    // Check if this is a new conversation to reset certain fields
+    const isNewConversation = history.length === 0;
+    if (isNewConversation) {
+      leadState.demoTime = '';
+      leadState.intent = 'info';
+      leadState.stage = 'New';
+    }
+
     // Plan Features for Explanation
     const planFeatures: any = {
       "Starter": ["Lead tracking", "Basic CRM", "1 Team member", "Email support"],
@@ -143,38 +151,36 @@ export async function POST(req: Request) {
 
     const systemPrompt = `
 You are the OrbitLead Sales Assistant. Your goal is to move leads through the sales pipeline:
-1. New Leads (Initial greeting)
-2. Qualified (User shares requirement/problem)
-3. Proposed (Budget shared or plan suggested)
-4. Demo Booked (Demo date/time confirmed)
-5. Closed (User confirms purchase or final decision)
+- New Leads (Initial)
+- Qualified (Requirement shared)
+- Proposed (Budget shared)
+- Demo Booked (Demo date/time confirmed)
+- Closed (User confirms purchase)
 
 STRICT STATUS (WHAT YOU ALREADY KNOW):
 - Lead Name: ${leadState.name}
 - Company: ${leadState.company}
 - Team Size: ${leadState.teamSize}
-- Budget: ${leadState.budget}
-- Current Plan: ${matchedPlan || "Unknown"}
+- Budget: ₹${leadState.budget}
+- Current Plan: ${matchedPlan || "None"}
 - Current Stage: ${leadState.stage}
 
 STRICT CONVERSATION RULES:
-1. NEVER ask for information already listed above. Use the lead's name if known.
-2. BE HUMAN, CONCISE, AND SALES-DRIVEN. Avoid repeated questions.
-3. STAGE TRIGGERS:
-   - Move to 'Proposed' when you suggest a plan.
-   - Move to 'Booked' when a demo is confirmed.
-   - Move to 'Completed' (Closed) when user says they want to proceed or confirms purchase.
+1. NEVER use "$" or "USD". Use only "₹" or "INR".
+2. If the user mentions "$", assume it's "₹" or normalize it to INR.
+3. NEVER ask for information already listed as known.
+4. BE HUMAN, CONCISE, AND SALES-DRIVEN.
 
-PLAN EXPLANATION STRUCTURE (When suggesting ${matchedPlan}):
+PLAN EXPLANATION (ONLY using ₹):
 - Recommend: "Based on your requirements, our ${matchedPlan} plan is the best fit 👍"
 - Features: List 3-4 features from: ${planFeatures[matchedPlan]?.join(", ") || "Standard lead tools"}
-- Connection: Briefly explain how it helps (e.g., "improve conversions", "stay organized").
-- Call to Action: "Would you like to schedule a demo?"
+- Value: "This will help you stay organized and improve conversions."
+- CTA: "Would you like to schedule a demo?"
 
-Return ONLY JSON format:
+Return ONLY JSON:
 {
-  "reply": "Your natural response here",
-  "extracted_data": { "name": "...", "budget": 123, "demoTime": "Friday 3PM", "intent": "purchase" },
+  "reply": "...",
+  "extracted_data": { "name": "...", "budget": 12345, "demoTime": "Friday 3PM", "intent": "demo | purchase | quality" },
   "intent": "greeting | requirement | budget | demo | purchase",
   "action": "ask | suggest | confirm"
 }
@@ -189,7 +195,7 @@ Return ONLY JSON format:
           { role: 'user', content: message }
         ],
         model: 'llama-3.3-70b-versatile',
-        temperature: 0.2, // Slightly increased for more natural flow while keeping it deterministic
+        temperature: 0.1, 
         response_format: { type: 'json_object' }
       });
       
@@ -211,7 +217,6 @@ Return ONLY JSON format:
     };
 
     const merge = (field: string, newValue: any, oldValue: any) => {
-      // Don't let null/empty/Visitor overwrite real data
       const isNewValid = newValue !== undefined && newValue !== null && newValue !== '' && newValue !== 0 && newValue !== 'Visitor' && newValue !== 'Unknown';
       if (isNewValid) {
         if (field === 'name' && typeof newValue === 'string') return newValue.trim().replace(/^['"]|['"]$/g, '');
@@ -227,31 +232,25 @@ Return ONLY JSON format:
     updateData.requirement = merge('requirement', extracted_data?.requirement, leadState.requirement);
     updateData.demoTime = merge('demoTime', extracted_data?.demoTime, leadState.demoTime);
 
-    // 5. Stage Transitions (Robust)
-    let nextStage: LeadStage = leadState.stage;
+    // 5. Stage Transitions (FRESH RECOMPUTATION - NO CARRYOVER)
+    let nextStage: LeadStage = 'New';
     
-    // New -> Qualified (User shares requirement or problem)
-    if (nextStage === 'New' && (updateData.requirement || intent === 'requirement')) {
-      nextStage = 'Qualified';
-    }
-    
-    // Qualified -> Proposed (Budget shared or plan suggested by AI)
-    if ((nextStage === 'New' || nextStage === 'Qualified') && (updateData.budget > 0 || intent === 'budget' || aiResult.action === 'suggest')) {
-      nextStage = 'Proposed';
-    }
-    
-    // Proposed -> Booked (Demo confirmed)
-    if (updateData.demoTime || intent === 'demo') {
-      if (updateData.name !== 'Visitor') {
-        nextStage = 'Booked';
-      }
-    }
-    
-    // Booked -> Completed (User confirms purchase / Closed)
-    if (intent === 'purchase' || /proceed|buy|purchase|yes|confirm|deal/i.test(message)) {
-      if (nextStage === 'Booked' || nextStage === 'Proposed') {
-        nextStage = 'Completed';
-      }
+    const hasRequirement = updateData.requirement || intent === 'requirement' || leadState.requirement;
+    const hasBudget = updateData.budget > 0 || intent === 'budget' || leadState.budget > 0;
+    const hasDemo = updateData.demoTime || intent === 'demo' || leadState.demoTime;
+    const isClosed = intent === 'purchase' || /proceed|buy|purchase|yes|confirm|deal/i.test(message);
+
+    // PRIORITY LOGIC
+    if (isClosed && (hasDemo || hasBudget)) {
+      nextStage = 'Completed'; // Closed
+    } else if (hasDemo && updateData.name !== 'Visitor') {
+      nextStage = 'Booked'; // Demo Booked
+    } else if (hasBudget) {
+      nextStage = 'Proposed'; // Proposed
+    } else if (hasRequirement) {
+      nextStage = 'Qualified'; // Qualified
+    } else {
+      nextStage = 'New'; // New Leads
     }
 
     updateData.stage = nextStage;
