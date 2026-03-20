@@ -134,8 +134,20 @@ export async function POST(req: Request) {
     // 3. Ultra-Robust AI Prompting
     const matchedPlan = getMatchedPlan(leadState.budget, pricingRules);
     
+    // Plan Features for Explanation
+    const planFeatures: any = {
+      "Starter": ["Lead tracking", "Basic CRM", "1 Team member", "Email support"],
+      "Growth": ["Lead tracking and pipeline management", "Automated follow-ups", "Team collaboration", "Performance analytics"],
+      "Enterprise": ["Custom integration", "Advanced automation", "Unlimited team members", "Priority 24/7 support"]
+    };
+
     const systemPrompt = `
-You are the OrbitLead Sales Assistant. 
+You are the OrbitLead Sales Assistant. Your goal is to move leads through the sales pipeline:
+1. New Leads (Initial greeting)
+2. Qualified (User shares requirement/problem)
+3. Proposed (Budget shared or plan suggested)
+4. Demo Booked (Demo date/time confirmed)
+5. Closed (User confirms purchase or final decision)
 
 STRICT STATUS (WHAT YOU ALREADY KNOW):
 - Lead Name: ${leadState.name}
@@ -145,25 +157,26 @@ STRICT STATUS (WHAT YOU ALREADY KNOW):
 - Current Plan: ${matchedPlan || "Unknown"}
 - Current Stage: ${leadState.stage}
 
-GOAL: Qualify lead and book a demo.
-FLOW: New -> Qualified -> Proposed -> Booked -> Completed
+STRICT CONVERSATION RULES:
+1. NEVER ask for information already listed above. Use the lead's name if known.
+2. BE HUMAN, CONCISE, AND SALES-DRIVEN. Avoid repeated questions.
+3. STAGE TRIGGERS:
+   - Move to 'Proposed' when you suggest a plan.
+   - Move to 'Booked' when a demo is confirmed.
+   - Move to 'Completed' (Closed) when user says they want to proceed or confirms purchase.
 
-CRITICAL RULES:
-1. NEVER ASK for information listed above as known.
-2. If Name is "Visitor", get the name.
-3. If Company is "Unknown", get the company.
-4. If Budget is known, suggest ${matchedPlan} and move to Proposed.
-5. If Demo intent is detected, CONFIRM it and move to Booked.
-6. BE HUMAN, CONCISE, AND SALES-DRIVEN.
-7. Return ONLY JSON.
+PLAN EXPLANATION STRUCTURE (When suggesting ${matchedPlan}):
+- Recommend: "Based on your requirements, our ${matchedPlan} plan is the best fit 👍"
+- Features: List 3-4 features from: ${planFeatures[matchedPlan]?.join(", ") || "Standard lead tools"}
+- Connection: Briefly explain how it helps (e.g., "improve conversions", "stay organized").
+- Call to Action: "Would you like to schedule a demo?"
 
-ONE-SHOT EXAMPLE:
-User: "I'm Kunal from SalesOrbit. Budget is 1L."
-Response: {
-  "reply": "Hi Kunal! Nice to have SalesOrbit here. Based on your budget, our Growth plan is perfect. Would you like a demo?",
-  "extracted_data": { "name": "Kunal", "company": "SalesOrbit", "budget": 100000 },
-  "intent": "budget",
-  "action": "suggest"
+Return ONLY JSON format:
+{
+  "reply": "Your natural response here",
+  "extracted_data": { "name": "...", "budget": 123, "demoTime": "Friday 3PM", "intent": "purchase" },
+  "intent": "greeting | requirement | budget | demo | purchase",
+  "action": "ask | suggest | confirm"
 }
 `;
 
@@ -176,7 +189,7 @@ Response: {
           { role: 'user', content: message }
         ],
         model: 'llama-3.3-70b-versatile',
-        temperature: 0.0,
+        temperature: 0.2, // Slightly increased for more natural flow while keeping it deterministic
         response_format: { type: 'json_object' }
       });
       
@@ -214,11 +227,33 @@ Response: {
     updateData.requirement = merge('requirement', extracted_data?.requirement, leadState.requirement);
     updateData.demoTime = merge('demoTime', extracted_data?.demoTime, leadState.demoTime);
 
-    // 5. Stage Transitions
+    // 5. Stage Transitions (Robust)
     let nextStage: LeadStage = leadState.stage;
-    if (nextStage === 'New' && (updateData.requirement || updateData.budget > 0)) nextStage = 'Qualified';
-    if (updateData.budget > 0 && matchedPlan && nextStage === 'Qualified') nextStage = 'Proposed';
-    if (updateData.demoTime && (updateData.name !== 'Visitor' && (updateData.budget > 0 || updateData.teamSize > 0))) nextStage = 'Booked';
+    
+    // New -> Qualified (User shares requirement or problem)
+    if (nextStage === 'New' && (updateData.requirement || intent === 'requirement')) {
+      nextStage = 'Qualified';
+    }
+    
+    // Qualified -> Proposed (Budget shared or plan suggested by AI)
+    if ((nextStage === 'New' || nextStage === 'Qualified') && (updateData.budget > 0 || intent === 'budget' || aiResult.action === 'suggest')) {
+      nextStage = 'Proposed';
+    }
+    
+    // Proposed -> Booked (Demo confirmed)
+    if (updateData.demoTime || intent === 'demo') {
+      if (updateData.name !== 'Visitor') {
+        nextStage = 'Booked';
+      }
+    }
+    
+    // Booked -> Completed (User confirms purchase / Closed)
+    if (intent === 'purchase' || /proceed|buy|purchase|yes|confirm|deal/i.test(message)) {
+      if (nextStage === 'Booked' || nextStage === 'Proposed') {
+        nextStage = 'Completed';
+      }
+    }
+
     updateData.stage = nextStage;
 
     // 6. Persistence
