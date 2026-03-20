@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Lead, Message } from "@/types"
 import { doc, getDoc, updateDoc } from "firebase/firestore"
 import { db } from "@/lib/firebase"
-import { Loader2 } from "lucide-react"
+import { Loader2, User, Bot, MessageCircle } from "lucide-react"
 
 export function LeadDetailModal({ 
   lead, 
@@ -105,7 +105,7 @@ export function LeadDetailModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col p-0 overflow-hidden">
+      <DialogContent className="max-w-5xl max-h-[90vh] flex flex-col p-0 overflow-hidden shadow-2xl border-none">
         <div className="flex flex-col md:flex-row h-full overflow-hidden">
           
           {/* Left Side - Edit Form */}
@@ -165,36 +165,58 @@ export function LeadDetailModal({
           </div>
 
           {/* Right Side - Chat History */}
-          <div className="flex-1 bg-slate-50 border-l border-slate-200 flex flex-col h-full overflow-hidden shrink-0 w-full md:max-w-xs">
-            <div className="p-4 bg-white border-b border-slate-200 shadow-sm z-10 sticky top-0">
-              <h3 className="font-semibold text-slate-800 text-sm">Conversation History</h3>
+          <div className="flex-1 bg-slate-50/50 border-l border-slate-200 flex flex-col h-full overflow-hidden shrink-0 w-full md:max-w-[400px]">
+            <div className="p-4 bg-white border-b border-slate-200 shadow-sm z-10 sticky top-0 flex items-center space-x-2">
+              <MessageCircle className="w-5 h-5 text-indigo-600" />
+              <h3 className="font-bold text-slate-800 text-sm tracking-tight">Conversation</h3>
             </div>
             
-            <div 
-              className="flex-1 overflow-y-auto p-4 space-y-4"
-            >
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
               {loadingHistory ? (
                 <div className="flex items-center justify-center h-full">
-                  <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
+                  <div className="flex flex-col items-center space-y-2">
+                    <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
+                    <p className="text-xs text-slate-400 font-medium">Loading history...</p>
+                  </div>
                 </div>
               ) : messages.length > 0 ? (
-                <>
+                <div className="flex flex-col space-y-6">
                   {messages.filter(m => m.role !== 'system').map((msg, idx) => (
-                    <div key={idx} className={`p-3 rounded-lg text-sm ${
-                      msg.role === 'assistant' 
-                        ? 'bg-slate-200 text-slate-900 ml-4 rounded-tr-none' 
-                        : 'bg-indigo-100 text-indigo-900 mr-4 rounded-tl-none'
-                    }`}>
-                      <span className="font-semibold text-[10px] uppercase tracking-wide block mb-1 opacity-70">
-                        {msg.role === 'assistant' ? 'AI Sales Rep' : 'Visitor'}
-                      </span>
-                      <p className="whitespace-pre-wrap">{msg.content}</p>
+                    <div key={idx} className={`flex w-full ${msg.role === 'assistant' ? 'justify-start' : 'justify-end'}`}>
+                      <div className={`flex max-w-[85%] ${msg.role === 'assistant' ? 'flex-row' : 'flex-row-reverse'} items-end gap-2`}>
+                        {/* Avatar */}
+                        <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center shadow-sm ${
+                          msg.role === 'assistant' ? 'bg-white border border-slate-200 text-indigo-600' : 'bg-indigo-600 text-white'
+                        }`}>
+                          {msg.role === 'assistant' ? <Bot size={14} /> : <User size={14} />}
+                        </div>
+
+                        {/* Bubble */}
+                        <div className={`flex flex-col ${msg.role === 'assistant' ? 'items-start' : 'items-end'}`}>
+                          <div className={`px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm ${
+                            msg.role === 'assistant' 
+                              ? 'bg-white text-slate-800 border border-slate-200 rounded-bl-sm' 
+                              : 'bg-indigo-600 text-white rounded-br-sm'
+                          }`}>
+                            <p className="whitespace-pre-wrap">{msg.content}</p>
+                          </div>
+                          <span className="text-[10px] text-slate-400 mt-1 font-medium px-1">
+                            {msg.role === 'assistant' ? 'Orbit AI' : 'Customer'}
+                          </span>
+                        </div>
+                      </div>
                     </div>
                   ))}
-                  <div ref={messagesEndRef} />
-                </>
+                  <div ref={messagesEndRef} className="h-2" />
+                </div>
               ) : (
-                <p className="text-sm text-slate-500 italic text-center mt-10">No conversation history available.</p>
+                <div className="flex flex-col items-center justify-center h-full text-center p-8">
+                  <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center mb-3">
+                    <MessageCircle className="w-6 h-6 text-slate-300" />
+                  </div>
+                  <p className="text-sm text-slate-500 font-medium">No conversation history</p>
+                  <p className="text-xs text-slate-400 mt-1">Lead hasn't messaged yet.</p>
+                </div>
               )}
             </div>
           </div>
