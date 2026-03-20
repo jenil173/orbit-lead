@@ -25,23 +25,26 @@ export function LeadDetailModal({
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = () => {
-    // We use a slightly longer timeout to ensure modal animations are finished
-    setTimeout(() => {
-      if (scrollContainerRef.current) {
-        const container = scrollContainerRef.current;
-        container.scrollTop = container.scrollHeight;
-        // Also call smooth scroll as a secondary measure
-        container.scrollTo({
-          top: container.scrollHeight,
-          behavior: "smooth"
-        });
-      }
-    }, 300)
+    if (scrollContainerRef.current) {
+      const container = scrollContainerRef.current;
+      container.scrollTop = container.scrollHeight;
+    }
   }
 
   useEffect(() => {
     if (isOpen && !loadingHistory && messages.length > 0) {
-      scrollToBottom()
+      // Multiple attempts to ensure it works after animations and rendering
+      scrollToBottom(); // Immediate
+      
+      const t1 = setTimeout(scrollToBottom, 100);
+      const t2 = setTimeout(scrollToBottom, 300);
+      const t3 = setTimeout(scrollToBottom, 600);
+      
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+      };
     }
   }, [messages.length, isOpen, loadingHistory])
   
@@ -163,7 +166,7 @@ export function LeadDetailModal({
             
             <div 
               ref={scrollContainerRef}
-              className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[60vh] md:max-h-full"
+              className="flex-1 overflow-y-auto p-4 space-y-4"
             >
               {loadingHistory ? (
                 <div className="flex items-center justify-center h-full">
