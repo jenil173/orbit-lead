@@ -51,31 +51,28 @@ export default function SettingsPage() {
           // Normalize data structure if it was the old flat number format
           const normalized: any = {};
           ['Starter', 'Growth', 'Enterprise'].forEach(key => {
+            const fallback = (defaultPricing as any)[key] || { name: key, price: 0, features: [] };
             if (typeof data[key] === 'number') {
               normalized[key] = {
                 name: key,
                 price: data[key],
-                features: (defaultPricing as any)[key]?.features?.join(", ") || ""
+                features: fallback.features.join(", ")
               };
             } else {
+              const features = Array.isArray(data[key]?.features) ? data[key].features : [];
               normalized[key] = {
                 ...data[key],
-                features: Array.isArray(data[key]?.features) ? data[key].features.join(", ") : (data[key]?.features || "")
+                features: features.length > 0 ? features.join(", ") : fallback.features.join(", ")
               };
             }
           });
           setPricing(normalized as PricingConfig);
         } else {
-          // Normalize defaultPricing check (it's an array in json, but we want an object)
-          let def: any = {};
-          if (Array.isArray(defaultPricing)) {
-             // For safety if pricing_config.json is the array format
-             ['Starter', 'Growth', 'Enterprise'].forEach(k => {
-                def[k] = { name: k, price: k === 'Starter' ? 5000 : k === 'Growth' ? 15000 : 50000, features: "" };
-             });
-          } else {
-             def = defaultPricing;
-          }
+          // Normalize defaultPricing (now an object)
+          const def: any = JSON.parse(JSON.stringify(defaultPricing));
+          ['Starter', 'Growth', 'Enterprise'].forEach(k => {
+             if (def[k]) def[k].features = def[k].features.join(", ");
+          });
           setPricing(def as PricingConfig);
         }
       } catch (error) {

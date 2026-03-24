@@ -117,13 +117,18 @@ export async function POST(req: Request) {
         // Normalize: Ensure we have the new object structure even if DB has old format
         const normalized: any = {};
         ['Starter', 'Growth', 'Enterprise'].forEach(key => {
-          if (typeof rawRules[key] === 'number') {
-             normalized[key] = { name: key, price: rawRules[key], features: [] };
-          } else if (rawRules[key]?.price) {
-             normalized[key] = rawRules[key];
+          const fallback = (fallbackPricing as any)[key] || { name: key, price: 0, features: [] };
+          const raw = rawRules[key];
+          
+          if (typeof raw === 'number') {
+             normalized[key] = { name: key, price: raw, features: fallback.features };
+          } else if (raw?.price) {
+             normalized[key] = {
+                ...raw,
+                features: (raw.features && raw.features.length > 0) ? raw.features : fallback.features
+             };
           } else {
-             // Fallback for missing keys
-             normalized[key] = { name: key, price: key === 'Starter' ? 5000 : key === 'Growth' ? 15000 : 50000, features: [] };
+             normalized[key] = fallback;
           }
         });
         pricingRules = normalized;
@@ -203,12 +208,14 @@ STRICT STATUS (WHAT YOU ALREADY KNOW):
 STRICT CONVERSATION RULES:
 1. NEVER use "$" or "USD". Use only "₹" or "INR".
 2. If the user asks about pricing, plans, or packages: IMMEDIATELY show the plans from the configuration. DO NOT ask for company name or team size first.
-3. NEVER generate fake prices. YOU MUST ONLY USE THE EXACT PRICES LISTED IN THE "CURRENT PRICING CONFIGURATION" ABOVE.
-4. DO NOT use old prices like 5,000 or 15,000 unless they are explicitly in the configuration now.
-5. If pricing info is NOT_AVAILABLE, use the specific fallback message mentioned above.
-6. RECOMMEND a plan ONLY if team size or budget is known. Otherwise, just explain the plans.
-7. If the user only asks about pricing, DO NOT immediately push for a demo. Instead ask: "Would you like help choosing the best plan for your team?"
-8. BE HUMAN, CONCISE, AND SALES-DRIVEN.
+3. EXPLAIN plans in detail: When explaining features, describe the VALUE of each feature (e.g., "Lead tracking helps you stay organized" rather than just "Lead tracking").
+4. ALWAYS list specific features for EACH plan. Even if they share some features, emphasize the unique upgrades in higher tiers.
+5. NEVER generate fake prices. YOU MUST ONLY USE THE EXACT PRICES LISTED IN THE "CURRENT PRICING CONFIGURATION" ABOVE.
+6. DO NOT use old prices like 5,000 or 15,000 unless they are explicitly in the configuration now.
+7. If pricing info is NOT_AVAILABLE, use the specific fallback message mentioned above.
+8. RECOMMEND a plan ONLY if team size or budget is known. Otherwise, just explain the plans.
+9. If the user only asks about pricing, DO NOT immediately push for a demo. Instead ask: "Would you like help choosing the best plan for your team?"
+10. BE HUMAN, CONCISE, AND SALES-DRIVEN.
 
 Return ONLY JSON:
 {

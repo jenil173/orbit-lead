@@ -1,5 +1,17 @@
-[
-  { "name": "Starter", "min": 0, "max": 50000 },
-  { "name": "Growth", "min": 50000, "max": 150000 },
-  { "name": "Enterprise", "min": 150000, "max": 1000000000 }
-]
+{
+  "Starter": {
+    "name": "Starter",
+    "price": 50000,
+    "features": ["Lead tracking", "Basic CRM", "1 Team member", "Email support"]
+  },
+  "Growth": {
+    "name": "Growth",
+    "price": 100000,
+    "features": ["Advanced pipeline management", "Automated follow-ups", "Team collaboration", "Analytics dashboard"]
+  },
+  "Enterprise": {
+    "name": "Enterprise",
+    "price": 200000,
+    "features": ["Custom integrations", "Unlimited members", "Priority 24/7 support", "Dedicated account manager"]
+  }
+}
