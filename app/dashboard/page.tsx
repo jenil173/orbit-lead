@@ -14,6 +14,9 @@ import { Button } from "@/components/ui/button";
 import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { LeadDetailModal } from "@/components/LeadDetailModal";
+import { DeveloperProfile } from "@/components/DeveloperProfile";
+import { DeveloperAboutModal } from "@/components/DeveloperAboutModal";
+import { HelpCircle } from "lucide-react";
 
 const stages: { id: LeadStage; label: string }[] = [
   { id: "New", label: "New Leads" },
@@ -108,6 +111,7 @@ export default function DashboardPage() {
   // Modal state
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -201,6 +205,9 @@ export default function DashboardPage() {
           <Button variant="outline" onClick={() => router.push("/dashboard/settings")}>
             Settings
           </Button>
+          <Button variant="ghost" onClick={() => setIsAboutOpen(true)} className="text-slate-500 hover:text-slate-800" title="About / Help">
+            <HelpCircle className="w-5 h-5" />
+          </Button>
           <Button variant="ghost" onClick={logout} className="text-slate-500 hover:text-slate-800">
             Sign out
           </Button>
@@ -242,7 +249,13 @@ export default function DashboardPage() {
             setSelectedLead(updatedLead);
           }} 
         />
+
+        <DeveloperAboutModal 
+          isOpen={isAboutOpen} 
+          onClose={() => setIsAboutOpen(false)} 
+        />
       </main>
+      <DeveloperProfile />
     </div>
   );
 }

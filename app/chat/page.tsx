@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Loader2, Send } from "lucide-react";
+import { DeveloperProfile } from "@/components/DeveloperProfile";
 
 export default function ChatPage() {
   const { user, loading } = useAuth();
@@ -184,6 +185,9 @@ export default function ChatPage() {
             </Button>
           </form>
         </div>
+      </div>
+      <div className="mt-2">
+        <DeveloperProfile />
       </div>
     </div>
   );
