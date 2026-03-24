@@ -106,21 +106,30 @@ export async function POST(req: Request) {
     const adminDb = getAdminDb();
 
     // 1. Dynamic Pricing
-    let pricingRules: any = null;
+    let pricingRules: any = fallbackPricing;
     let pricingAvailable = false;
     try {
       const pricingSnap = await adminDb.collection('settings').doc('pricing').get();
       if (pricingSnap.exists) {
         const pData = pricingSnap.data();
-        pricingRules = pData?.rules || pData;
+        const rawRules = pData?.rules || pData;
+        
+        // Normalize: Ensure we have the new object structure even if DB has old format
+        const normalized: any = {};
+        ['Starter', 'Growth', 'Enterprise'].forEach(key => {
+          if (typeof rawRules[key] === 'number') {
+             normalized[key] = { name: key, price: rawRules[key], features: [] };
+          } else if (rawRules[key]?.price) {
+             normalized[key] = rawRules[key];
+          } else {
+             // Fallback for missing keys
+             normalized[key] = { name: key, price: key === 'Starter' ? 5000 : key === 'Growth' ? 15000 : 50000, features: [] };
+          }
+        });
+        pricingRules = normalized;
         pricingAvailable = true;
       }
     } catch (e) { console.error("[ERROR] Pricing:", e); }
-
-    // If pricing config is missing, we'll use a specific fallback behavior later if needed
-    if (!pricingRules) {
-      pricingRules = fallbackPricing;
-    }
 
     // 2. Persistent State & History
     let currentLeadData: any = null;
@@ -170,15 +179,9 @@ export async function POST(req: Request) {
     // Format pricing for the prompt
     let pricingContext = "";
     if (pricingAvailable) {
-       if (pricingRules.Starter?.name) {
-          // New dynamic format
-          pricingContext = Object.values(pricingRules).map((p: any) => 
-            `${p.name} - ₹${p.price}\n` + (p.features?.map((f: string) => `• ${f}`).join("\n") || "• Standard features")
-          ).join("\n\n");
-       } else {
-          // Old format fallback
-          pricingContext = "Starter - ₹5,000\nGrowth - ₹15,000\nEnterprise - Custom pricing";
-       }
+       pricingContext = Object.values(pricingRules).map((p: any) => 
+         `${p.name} - ₹${p.price}\n` + (p.features && p.features.length > 0 ? p.features.map((f: string) => `• ${f}`).join("\n") : "• Standard lead generation tools")
+       ).join("\n\n");
     }
 
     const systemPrompt = `
