@@ -32,6 +32,18 @@ export interface Conversation {
   leadId?: string;
 }
 
+export interface PlanConfig {
+  name: string;
+  price: number;
+  features: string[];
+}
+
+export interface PricingSettings {
+  Starter: PlanConfig;
+  Growth: PlanConfig;
+  Enterprise: PlanConfig;
+}
+
 export interface PricingRule {
   name: string;
   min: number;

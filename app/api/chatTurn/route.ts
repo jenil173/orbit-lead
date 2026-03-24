@@ -65,7 +65,15 @@ function getMatchedPlan(budget: number, pricingRules: any): string {
     return match ? match.name : "Enterprise";
   }
   
-  // Handle Flat Object structure (new settings)
+  // Handle New Flat Object with nested PlanConfig
+  if (pricingRules.Starter?.price) {
+    const p = pricingRules;
+    if (budget <= p.Starter.price) return p.Starter.name;
+    if (budget <= p.Growth.price) return p.Growth.name;
+    return p.Enterprise.name;
+  }
+
+  // Handle Old Flat Object structure (numbers)
   const p = pricingRules;
   if (budget <= (p.Starter || 50000)) return "Starter";
   if (budget <= (p.Growth || 100000)) return "Growth";
@@ -98,15 +106,21 @@ export async function POST(req: Request) {
     const adminDb = getAdminDb();
 
     // 1. Dynamic Pricing
-    let pricingRules: any = fallbackPricing;
+    let pricingRules: any = null;
+    let pricingAvailable = false;
     try {
       const pricingSnap = await adminDb.collection('settings').doc('pricing').get();
       if (pricingSnap.exists) {
         const pData = pricingSnap.data();
-        // Use the whole object if it's the new flat structure, or the .rules if it's the old array structure
         pricingRules = pData?.rules || pData;
+        pricingAvailable = true;
       }
     } catch (e) { console.error("[ERROR] Pricing:", e); }
+
+    // If pricing config is missing, we'll use a specific fallback behavior later if needed
+    if (!pricingRules) {
+      pricingRules = fallbackPricing;
+    }
 
     // 2. Persistent State & History
     let currentLeadData: any = null;
@@ -153,20 +167,27 @@ export async function POST(req: Request) {
       leadState.stage = 'New';
     }
 
-    // Plan Features for Explanation
-    const planFeatures: any = {
-      "Starter": ["Lead tracking", "Basic CRM", "1 Team member", "Email support"],
-      "Growth": ["Lead tracking and pipeline management", "Automated follow-ups", "Team collaboration", "Performance analytics"],
-      "Enterprise": ["Custom integration", "Advanced automation", "Unlimited team members", "Priority 24/7 support"]
-    };
+    // Format pricing for the prompt
+    let pricingContext = "";
+    if (pricingAvailable) {
+       if (pricingRules.Starter?.name) {
+          // New dynamic format
+          pricingContext = Object.values(pricingRules).map((p: any) => 
+            `${p.name} - ₹${p.price}\n` + (p.features?.map((f: string) => `• ${f}`).join("\n") || "• Standard features")
+          ).join("\n\n");
+       } else {
+          // Old format fallback
+          pricingContext = "Starter - ₹5,000\nGrowth - ₹15,000\nEnterprise - Custom pricing";
+       }
+    }
 
     const systemPrompt = `
-You are the OrbitLead Sales Assistant. Your goal is to move leads through the sales pipeline:
-- New Leads (Initial)
-- Qualified (Requirement shared)
-- Proposed (Budget shared)
-- Demo Booked (Demo date/time confirmed)
-- Closed (User confirms purchase)
+You are the OrbitLead Sales Assistant. Your goal is to move leads through the sales pipeline.
+
+CURRENT PRICING CONFIGURATION:
+${pricingAvailable ? pricingContext : "NOT_AVAILABLE"}
+
+${!pricingAvailable ? 'CRITICAL: Pricing information is currently unavailable. If the user asks about pricing, respond with: "We offer several plans depending on team size and requirements. I can explain them once pricing information is available, or help recommend the best option for your needs."' : ''}
 
 STRICT STATUS (WHAT YOU ALREADY KNOW):
 - Lead Name: ${leadState.name}
@@ -178,22 +199,19 @@ STRICT STATUS (WHAT YOU ALREADY KNOW):
 
 STRICT CONVERSATION RULES:
 1. NEVER use "$" or "USD". Use only "₹" or "INR".
-2. If the user mentions "$", assume it's "₹" or normalize it to INR.
-3. NEVER ask for information already listed as known.
-4. BE HUMAN, CONCISE, AND SALES-DRIVEN.
-
-PLAN EXPLANATION (ONLY using ₹):
-- Recommend: "Based on your requirements, our ${matchedPlan} plan is the best fit 👍"
-- Features: List 3-4 features from: ${planFeatures[matchedPlan]?.join(", ") || "Standard lead tools"}
-- Value: "This will help you stay organized and improve conversions."
-- CTA: "Would you like to schedule a demo?"
+2. If the user asks about pricing, plans, or packages: IMMEDIATELY show the plans from the configuration. DO NOT ask for company name or team size first.
+3. NEVER generate fake prices. Only use exact values from the configuration above.
+4. If pricing info is NOT_AVAILABLE, use the specific fallback message mentioned above.
+5. RECOMMEND a plan ONLY if team size or budget is known. Otherwise, just explain the plans.
+6. If the user only asks about pricing, DO NOT immediately push for a demo. Instead ask: "Would you like help choosing the best plan for your team?"
+7. BE HUMAN, CONCISE, AND SALES-DRIVEN.
 
 Return ONLY JSON:
 {
   "reply": "...",
   "extracted_data": { "name": "...", "budget": 12345, "demoTime": "Friday 3PM", "intent": "demo | purchase | quality" },
-  "intent": "greeting | requirement | budget | demo | purchase",
-  "action": "ask | suggest | confirm"
+  "intent": "greeting | requirement | budget | demo | purchase | pricing",
+  "action": "ask | show_plans | suggest | confirm"
 }
 `;
 

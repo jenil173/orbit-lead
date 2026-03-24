@@ -12,10 +12,16 @@ import { Button } from "@/components/ui/button";
 import { Loader2, Save, ArrowLeft } from "lucide-react";
 import defaultPricing from "@/pricing_config.json";
 
+interface PlanConfig {
+  name: string;
+  price: number;
+  features: string; // Comma separated for editing
+}
+
 interface PricingConfig {
-  Starter: number;
-  Growth: number;
-  Enterprise: number;
+  Starter: PlanConfig;
+  Growth: PlanConfig;
+  Enterprise: PlanConfig;
 }
 
 export default function SettingsPage() {
@@ -41,15 +47,40 @@ export default function SettingsPage() {
         const docSnap = await getDoc(docRef);
         
         if (docSnap.exists()) {
-          setPricing(docSnap.data() as PricingConfig);
+          const data = docSnap.data();
+          // Normalize data structure if it was the old flat number format
+          const normalized: any = {};
+          ['Starter', 'Growth', 'Enterprise'].forEach(key => {
+            if (typeof data[key] === 'number') {
+              normalized[key] = {
+                name: key,
+                price: data[key],
+                features: (defaultPricing as any)[key]?.features?.join(", ") || ""
+              };
+            } else {
+              normalized[key] = {
+                ...data[key],
+                features: Array.isArray(data[key]?.features) ? data[key].features.join(", ") : (data[key]?.features || "")
+              };
+            }
+          });
+          setPricing(normalized as PricingConfig);
         } else {
-          // If not exists, use defaults from json
-          setPricing(defaultPricing as PricingConfig);
+          // Normalize defaultPricing check (it's an array in json, but we want an object)
+          let def: any = {};
+          if (Array.isArray(defaultPricing)) {
+             // For safety if pricing_config.json is the array format
+             ['Starter', 'Growth', 'Enterprise'].forEach(k => {
+                def[k] = { name: k, price: k === 'Starter' ? 5000 : k === 'Growth' ? 15000 : 50000, features: "" };
+             });
+          } else {
+             def = defaultPricing;
+          }
+          setPricing(def as PricingConfig);
         }
       } catch (error) {
         console.error("Error fetching pricing:", error);
-        // Fallback to default pricing on error to prevent broken UI
-        setPricing(defaultPricing as PricingConfig);
+        setFetching(false);
       } finally {
         setFetching(false);
       }
@@ -64,15 +95,20 @@ export default function SettingsPage() {
     setSuccessMsg("");
     
     try {
-      await setDoc(doc(db, "settings", "pricing"), pricing);
+      // Convert features back to array before saving
+      const dataToSave = JSON.parse(JSON.stringify(pricing));
+      ['Starter', 'Growth', 'Enterprise'].forEach(key => {
+        if (typeof dataToSave[key].features === 'string') {
+          dataToSave[key].features = dataToSave[key].features.split(',').map((s: string) => s.trim()).filter(Boolean);
+        }
+      });
+
+      await setDoc(doc(db, "settings", "pricing"), dataToSave);
       setSuccessMsg("Pricing updated successfully!");
       setTimeout(() => setSuccessMsg(""), 3000);
     } catch (error: any) {
       console.error("Failed to save pricing config:", error);
-      const errorMsg = error.code === 'permission-denied' 
-        ? "Permission denied. Please check your Firestore security rules." 
-        : (error.message || "Unknown error occurred.");
-      alert(`Failed to save configuration: ${errorMsg}`);
+      alert(`Failed to save configuration: ${error.message || "Unknown error occurred."}`);
     } finally {
       setSaving(false);
     }
@@ -86,54 +122,65 @@ export default function SettingsPage() {
     );
   }
 
+  const renderPlanFields = (key: keyof PricingConfig, label: string) => {
+    if (!pricing) return null;
+    return (
+      <div className="p-4 border border-slate-200 rounded-lg space-y-4 bg-white">
+        <h3 className="font-semibold text-slate-700">{label}</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label htmlFor={`${key}-name`}>Plan Name</Label>
+            <Input
+              id={`${key}-name`}
+              value={pricing[key].name}
+              onChange={(e) => setPricing({...pricing, [key]: {...pricing[key], name: e.target.value}})}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor={`${key}-price`}>Price (₹/mo)</Label>
+            <Input
+              id={`${key}-price`}
+              type="number"
+              value={pricing[key].price}
+              onChange={(e) => setPricing({...pricing, [key]: {...pricing[key], price: Number(e.target.value)}})}
+            />
+          </div>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor={`${key}-features`}>Features (comma separated)</Label>
+          <Input
+            id={`${key}-features`}
+            placeholder="e.g. Lead tracking, Basic CRM, 1 Team member"
+            value={pricing[key].features}
+            onChange={(e) => setPricing({...pricing, [key]: {...pricing[key], features: e.target.value}})}
+          />
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col items-center py-10 px-4">
-      <div className="w-full max-w-2xl mb-6">
+    <div className="min-h-screen bg-slate-50 flex flex-col items-center py-10 px-4 pb-20">
+      <div className="w-full max-w-3xl mb-6">
         <Button variant="ghost" onClick={() => router.push("/dashboard")} className="text-slate-500 hover:text-slate-800 -ml-4">
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back to Dashboard
         </Button>
       </div>
 
-      <Card className="w-full max-w-2xl shadow-sm border-slate-200">
+      <Card className="w-full max-w-3xl shadow-sm border-slate-200">
         <CardHeader>
-          <CardTitle className="text-2xl text-slate-800">AI Sales Configuration</CardTitle>
+          <CardTitle className="text-2xl text-slate-800">Dynamic Pricing Configuration</CardTitle>
           <CardDescription>
-            Adjust the pricing packages the OrbitLead AI will suggest to prospects.
+            Configure the plans, prices, and features that the OrbitLead AI will present to users.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
-          <div className="grid gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="starter">Starter Plan (₹/mo)</Label>
-              <Input
-                id="starter"
-                type="number"
-                value={pricing?.Starter ?? ''}
-                onChange={(e) => setPricing(prev => prev ? { ...prev, Starter: Number(e.target.value) } : null)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="growth">Growth Plan (₹/mo)</Label>
-              <Input
-                id="growth"
-                type="number"
-                value={pricing?.Growth ?? ''}
-                onChange={(e) => setPricing(prev => prev ? { ...prev, Growth: Number(e.target.value) } : null)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="enterprise">Enterprise Plan (₹/mo)</Label>
-              <Input
-                id="enterprise"
-                type="number"
-                value={pricing?.Enterprise ?? ''}
-                onChange={(e) => setPricing(prev => prev ? { ...prev, Enterprise: Number(e.target.value) } : null)}
-              />
-            </div>
-          </div>
+          {renderPlanFields('Starter', 'Starter Plan')}
+          {renderPlanFields('Growth', 'Growth Plan')}
+          {renderPlanFields('Enterprise', 'Enterprise Plan')}
         </CardContent>
-        <CardFooter className="flex justify-between border-t border-slate-100 p-6">
+        <CardFooter className="flex justify-between border-t border-slate-100 p-6 sticky bottom-0 bg-white z-10">
           <p className="text-sm font-medium text-green-600">{successMsg}</p>
           <Button onClick={handleSave} disabled={saving} className="bg-indigo-600 hover:bg-indigo-700">
             {saving && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
